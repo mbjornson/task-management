@@ -160,9 +160,9 @@ def get_research_tasks():
     return files
 
 def get_in_progress_ideas():
-    """Get all ideas with status: in progress."""
+    """Get all ideas with status: in progress or status: in-progress."""
     stdout, stderr, code = run_command(
-        f"grep -l '^status: in progress$' {IDEAS_DIR}/*.md 2>/dev/null || true"
+        f"grep -l -E '^status: in[ -]progress$' {IDEAS_DIR}/*.md 2>/dev/null || true"
     )
 
     if not stdout:
