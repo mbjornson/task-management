@@ -5,59 +5,42 @@ Archive completed one-time tasks from tasks/ to completed/.
 Recurring tasks (those with recurrence: field) are never archived.
 """
 
-import subprocess
+import re
+import shutil
 from pathlib import Path
 
-from config import get_tasks_root, get_folder
+from config import get_folder
 
 
-def run_command(cmd):
-    """Run a shell command and return output."""
-    result = subprocess.run(
-        cmd,
-        shell=True,
-        cwd=get_tasks_root(),
-        capture_output=True,
-        text=True
-    )
-    return result.stdout.strip(), result.stderr.strip(), result.returncode
+def has_frontmatter_field(file_path: Path, field: str) -> bool:
+    """Check if a markdown file's YAML frontmatter contains a field."""
+    text = file_path.read_text(encoding="utf-8")
+    # Match field at start of line within frontmatter (between --- delimiters)
+    match = re.search(r"^---\s*\n(.*?)^---\s*\n", text, re.MULTILINE | re.DOTALL)
+    if not match:
+        return False
+    return any(line.startswith(f"{field}:") for line in match.group(1).splitlines())
 
 
 def archive_completed_tasks():
     """Archive completed one-time tasks to completed/ folder."""
-    tasks_dir = get_folder("tasks")
-    completed_dir = get_folder("completed")
+    tasks_dir = Path(get_folder("tasks"))
+    completed_dir = Path(get_folder("completed"))
+    completed_dir.mkdir(parents=True, exist_ok=True)
 
-    # Grep for files with completed: field
-    stdout, stderr, code = run_command(
-        f"grep -il '^completed:' {tasks_dir}/*.md 2>/dev/null || true"
-    )
-
-    if not stdout:
-        print("No completed tasks to archive.")
-        return
-
-    completed_files = stdout.split('\n')
     archived = []
     skipped = []
 
-    for file_path in completed_files:
-        if not file_path:
+    for md_file in sorted(tasks_dir.glob("*.md")):
+        if not has_frontmatter_field(md_file, "completed"):
             continue
 
-        # Check if it has recurrence field (recurring tasks don't get archived)
-        check_cmd = f"grep -q '^recurrence:' '{file_path}'"
-        _, _, has_recurrence = run_command(check_cmd)
-
-        if has_recurrence == 0:  # grep found recurrence field
-            filename = Path(file_path).name
-            skipped.append(filename)
+        if has_frontmatter_field(md_file, "recurrence"):
+            skipped.append(md_file.name)
             continue
 
-        # Move to completed/
-        filename = Path(file_path).name
-        run_command(f"mv '{file_path}' '{completed_dir}/'")
-        archived.append(filename)
+        shutil.move(str(md_file), str(completed_dir / md_file.name))
+        archived.append(md_file.name)
 
     # Report results
     if archived:
