@@ -231,8 +231,22 @@ def get_podcast_digest(today_str):  # pylint: disable=too-many-branches,too-many
     current_podcast = None
     current_episode = None
     in_summary = False
+    in_action_items = False
     summary_lines = []
+    action_item_lines = []
     past_frontmatter = False
+
+    def flush_section():
+        nonlocal in_summary, in_action_items, summary_lines, action_item_lines
+        if current_episode:
+            if summary_lines:
+                current_episode['summary'] = '\n'.join(summary_lines).strip()
+            if action_item_lines:
+                current_episode['action_items'] = '\n'.join(action_item_lines).strip()
+        in_summary = False
+        in_action_items = False
+        summary_lines = []
+        action_item_lines = []
 
     for line in lines:
         stripped = line.rstrip('\n')
@@ -248,28 +262,30 @@ def get_podcast_digest(today_str):  # pylint: disable=too-many-branches,too-many
             continue
 
         if stripped.startswith('## ') and not stripped.startswith('### '):
-            if current_episode and summary_lines:
-                current_episode['summary'] = '\n'.join(summary_lines).strip()
-            in_summary = False
-            summary_lines = []
+            flush_section()
             current_podcast = {'name': stripped[3:], 'episodes': []}
             podcasts.append(current_podcast)
             current_episode = None
 
         elif stripped.startswith('### ') and current_podcast is not None:
-            if current_episode and summary_lines:
-                current_episode['summary'] = '\n'.join(summary_lines).strip()
-            in_summary = False
-            summary_lines = []
-            current_episode = {'title': stripped[4:], 'summary': ''}
+            flush_section()
+            current_episode = {'title': stripped[4:], 'summary': '', 'action_items': ''}
             current_podcast['episodes'].append(current_episode)
 
         elif stripped == '**Summary**' and current_episode is not None:
+            flush_section()
             in_summary = True
-            summary_lines = []
+
+        elif stripped == '**Action Items**' and current_episode is not None:
+            if in_summary and summary_lines:
+                current_episode['summary'] = '\n'.join(summary_lines).strip()
+                summary_lines = []
+            in_summary = False
+            in_action_items = True
+            action_item_lines = []
 
         elif in_summary:
-            if stripped.startswith('**') and stripped.endswith('**') and stripped != '**Summary**':
+            if stripped.startswith('**') and stripped.endswith('**'):
                 current_episode['summary'] = '\n'.join(summary_lines).strip()
                 in_summary = False
                 summary_lines = []
@@ -280,8 +296,19 @@ def get_podcast_digest(today_str):  # pylint: disable=too-many-branches,too-many
             else:
                 summary_lines.append(stripped)
 
-    if current_episode and summary_lines:
-        current_episode['summary'] = '\n'.join(summary_lines).strip()
+        elif in_action_items:
+            if stripped.startswith('**') and stripped.endswith('**'):
+                current_episode['action_items'] = '\n'.join(action_item_lines).strip()
+                in_action_items = False
+                action_item_lines = []
+            elif stripped.startswith('## ') or stripped.startswith('### '):
+                current_episode['action_items'] = '\n'.join(action_item_lines).strip()
+                in_action_items = False
+                action_item_lines = []
+            else:
+                action_item_lines.append(stripped)
+
+    flush_section()
 
     return podcasts if podcasts else None
 
@@ -349,6 +376,16 @@ def generate_today_md(dates):
                     content += f"**{episode['title']}**\n\n"
                     if episode['summary']:
                         content += f"{episode['summary']}\n\n"
+                    if episode.get('action_items'):
+                        content += "**Action Items**\n"
+                        for item_line in episode['action_items'].split('\n'):
+                            item_line = item_line.strip()
+                            if not item_line:
+                                continue
+                            if item_line.startswith('- '):
+                                item_line = item_line[2:]
+                            content += f"- [ ] {item_line}\n"
+                        content += "\n"
             content += "\n"
 
     if ideas:

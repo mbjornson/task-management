@@ -209,6 +209,45 @@ class TestGetPodcastDigest:
         assert len(result[0]["episodes"]) == 2
         assert result[0]["episodes"][0]["title"] == "First Episode"
         assert result[0]["episodes"][1]["title"] == "Second Episode"
+        assert result[0]["episodes"][0]["action_items"] == ""
+        assert "do something" in result[0]["episodes"][1]["action_items"]
+
+    def test_parses_action_items(self, tmp_path):
+        digest = textwrap.dedent("""\
+            ---
+            type: digest
+            ---
+
+            # Daily Digest
+
+            ## Test Pod
+
+            ### Great Episode
+
+            **Summary**
+
+            Summary text here.
+
+            **Key Points**
+
+            - Key point one
+
+            **Action Items**
+
+            - First action item
+            - Second action item
+            - Read: Some Book by Some Author
+        """)
+        (tmp_path / "2026-05-19.md").write_text(digest)
+
+        with patch.object(gdf, "get_podcast_digest_path", return_value=tmp_path):
+            result = gdf.get_podcast_digest("2026-05-19")
+
+        episode = result[0]["episodes"][0]
+        assert episode["summary"] == "Summary text here."
+        assert "First action item" in episode["action_items"]
+        assert "Second action item" in episode["action_items"]
+        assert "Read: Some Book" in episode["action_items"]
 
     def test_empty_digest_returns_none(self, tmp_path):
         digest = textwrap.dedent("""\
