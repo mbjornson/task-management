@@ -357,6 +357,19 @@ def get_podcast_digest(today_str):  # pylint: disable=too-many-branches,too-many
     return podcasts if podcasts else None
 
 
+def _format_action_items(action_items_text):
+    """Return action-items text as checkable markdown task lines."""
+    lines = []
+    for item_line in action_items_text.split('\n'):
+        item_line = item_line.strip()
+        if not item_line:
+            continue
+        if item_line.startswith('- '):
+            item_line = item_line[2:]
+        lines.append(f"- [ ] {item_line}\n")
+    return "".join(lines)
+
+
 def generate_today_md(dates):
     """Generate today.md file."""
     print("\nGenerating today.md...")
@@ -422,13 +435,7 @@ def generate_today_md(dates):
                         content += f"{episode['summary']}\n\n"
                     if episode.get('action_items'):
                         content += "**Action Items**\n"
-                        for item_line in episode['action_items'].split('\n'):
-                            item_line = item_line.strip()
-                            if not item_line:
-                                continue
-                            if item_line.startswith('- '):
-                                item_line = item_line[2:]
-                            content += f"- [ ] {item_line}\n"
+                        content += _format_action_items(episode['action_items'])
                         content += "\n"
             content += "\n"
 
