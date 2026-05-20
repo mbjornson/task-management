@@ -17,7 +17,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 # Import config and dates from same directory
-from config import get_tasks_root, get_folder, get_link_format, is_apple_calendar_enabled, get_apple_calendar_calendars, is_podcast_digest_enabled, get_podcast_digest_path
+from config import (
+    get_tasks_root, get_folder, get_link_format,
+    is_apple_calendar_enabled, get_apple_calendar_calendars,
+    is_podcast_digest_enabled, get_podcast_digest_path,
+)
 from dates import get_week_dates
 
 try:
@@ -210,7 +214,7 @@ def format_link(filename, folder=None):
         # Default to obsidian wiki-links
         return f"[[{filename}]]"
 
-def get_podcast_digest(today_str):
+def get_podcast_digest(today_str):  # pylint: disable=too-many-branches,too-many-statements
     """Parse today's podcast digest file and return structured data."""
     digest_path = get_podcast_digest_path()
     if not digest_path:
@@ -220,7 +224,7 @@ def get_podcast_digest(today_str):
     if not digest_file.exists():
         return None
 
-    with open(digest_file) as f:
+    with open(digest_file, encoding="utf-8") as f:
         lines = f.readlines()
 
     podcasts = []
