@@ -23,6 +23,10 @@ This script will:
 4. Grep for tasks by specific dates
 5. Generate all three files (today.md, this-week.md, next-week.md)
 
+When `integrations.apple_calendar` is `true`, the script fetches today's events from Apple Calendar (via AppleScript on macOS) and writes the **## Meetings** section (after Due Today, before In Progress Ideas). This happens every time the script runs—whether from `/today`, cron, or the command line.
+
+When `integrations.podcast_digest` is `true` and `integrations.podcast_digest_path` points to a directory containing `yyyy-mm-dd.md` digest files, the script reads today's digest and writes a **## Podcast Digest** section (after Meetings, before In Progress Ideas) with podcast names, episode titles, and summaries.
+
 ### Step 2: Generate Research Digest (Optional)
 
 **Only if `integrations.research_system` is `true` in `~/.claude/task-management-config/config.yaml`:**
@@ -50,6 +54,15 @@ date: 2025-10-03
 - [ ] [[give-dog-flea-medicine]]
 - [ ] [[bbc-sale]]
 - [ ] [[schedule-grooming-loosa]]
+
+## Meetings
+- 9:00:00 AM–9:30:00 AM Standup
+- 2:00:00 PM–3:00:00 PM Client call
+
+## Podcast Digest
+### Lenny's Podcast
+**The art of influence: The single most important skill...**
+Summary paragraph from the episode digest.
 
 ## In Progress Ideas
 - [[next-ai-project]]

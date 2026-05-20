@@ -17,8 +17,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 # Import config and dates from same directory
-from config import get_tasks_root, get_folder, get_link_format
+from config import get_tasks_root, get_folder, get_link_format, is_apple_calendar_enabled, get_apple_calendar_calendars, is_podcast_digest_enabled, get_podcast_digest_path
 from dates import get_week_dates
+
+try:
+    from calendar_apple import get_today_events
+except ImportError:
+    get_today_events = None
 
 # Get directories from config
 BASE_DIR = get_tasks_root()
@@ -70,7 +75,7 @@ def archive_completed_tasks():
 def get_tasks_for_date(date):
     """Get all tasks with a specific due date, excluding research tasks."""
     stdout, stderr, code = run_command(
-        f"grep -l '^due: {date}$' {TASKS_DIR}/*.md 2>/dev/null || true"
+        f"grep -l '^due: {date}$' '{TASKS_DIR}'/*.md 2>/dev/null || true"
     )
 
     if not stdout:
@@ -98,7 +103,7 @@ def get_overdue_tasks(today):
     # This is trickier - we need to grep for dates before today
     # For simplicity, grep for any due: field, then filter
     stdout, stderr, code = run_command(
-        f"grep -h '^due: ' {TASKS_DIR}/*.md 2>/dev/null || true"
+        f"grep -h '^due: ' '{TASKS_DIR}'/*.md 2>/dev/null || true"
     )
 
     if not stdout:
@@ -110,7 +115,7 @@ def get_overdue_tasks(today):
 
     # Get all task files and check their dates
     stdout, stderr, code = run_command(
-        f"grep -l '^due: ' {TASKS_DIR}/*.md 2>/dev/null || true"
+        f"grep -l '^due: ' '{TASKS_DIR}'/*.md 2>/dev/null || true"
     )
 
     if not stdout:
@@ -145,7 +150,7 @@ def get_research_tasks():
     """Get all research tasks (research-review or research-summary-needed tags)."""
     # Get files with research tags
     stdout, stderr, code = run_command(
-        f"grep -l 'research-review\\|research-summary-needed' {TASKS_DIR}/*.md 2>/dev/null || true"
+        f"grep -l 'research-review\\|research-summary-needed' '{TASKS_DIR}'/*.md 2>/dev/null || true"
     )
 
     if not stdout:
@@ -162,7 +167,7 @@ def get_research_tasks():
 def get_in_progress_ideas():
     """Get all ideas with status: in progress."""
     stdout, stderr, code = run_command(
-        f"grep -l '^status: in progress$' {IDEAS_DIR}/*.md 2>/dev/null || true"
+        f"grep -l '^status: in progress$' '{IDEAS_DIR}'/*.md 2>/dev/null || true"
     )
 
     if not stdout:
@@ -205,6 +210,78 @@ def format_link(filename, folder=None):
         # Default to obsidian wiki-links
         return f"[[{filename}]]"
 
+def get_podcast_digest(today_str):
+    """Parse today's podcast digest file and return structured data."""
+    digest_path = get_podcast_digest_path()
+    if not digest_path:
+        return None
+
+    digest_file = digest_path / f"{today_str}.md"
+    if not digest_file.exists():
+        return None
+
+    with open(digest_file) as f:
+        lines = f.readlines()
+
+    podcasts = []
+    current_podcast = None
+    current_episode = None
+    in_summary = False
+    summary_lines = []
+    past_frontmatter = False
+
+    for line in lines:
+        stripped = line.rstrip('\n')
+
+        if not past_frontmatter:
+            if stripped == '---':
+                continue
+            if not stripped.startswith('# '):
+                continue
+            past_frontmatter = True
+
+        if stripped == '---':
+            continue
+
+        if stripped.startswith('## ') and not stripped.startswith('### '):
+            if current_episode and summary_lines:
+                current_episode['summary'] = '\n'.join(summary_lines).strip()
+            in_summary = False
+            summary_lines = []
+            current_podcast = {'name': stripped[3:], 'episodes': []}
+            podcasts.append(current_podcast)
+            current_episode = None
+
+        elif stripped.startswith('### ') and current_podcast is not None:
+            if current_episode and summary_lines:
+                current_episode['summary'] = '\n'.join(summary_lines).strip()
+            in_summary = False
+            summary_lines = []
+            current_episode = {'title': stripped[4:], 'summary': ''}
+            current_podcast['episodes'].append(current_episode)
+
+        elif stripped == '**Summary**' and current_episode is not None:
+            in_summary = True
+            summary_lines = []
+
+        elif in_summary:
+            if stripped.startswith('**') and stripped.endswith('**') and stripped != '**Summary**':
+                current_episode['summary'] = '\n'.join(summary_lines).strip()
+                in_summary = False
+                summary_lines = []
+            elif stripped.startswith('## ') or stripped.startswith('### '):
+                current_episode['summary'] = '\n'.join(summary_lines).strip()
+                in_summary = False
+                summary_lines = []
+            else:
+                summary_lines.append(stripped)
+
+    if current_episode and summary_lines:
+        current_episode['summary'] = '\n'.join(summary_lines).strip()
+
+    return podcasts if podcasts else None
+
+
 def generate_today_md(dates):
     """Generate today.md file."""
     print("\nGenerating today.md...")
@@ -234,6 +311,42 @@ def generate_today_md(dates):
             content += f"- [ ] {format_link(filename, 'tasks')}\n"
     content += "\n"
 
+    # Apple Calendar: when enabled, script fetches today's events and fills Meetings every run
+    events = []
+    if is_apple_calendar_enabled() and get_today_events:
+        events = get_today_events(get_apple_calendar_calendars())
+        content += "## Meetings\n"
+        if events:
+            for e in events:
+                start = e.get("start", "")
+                end = e.get("end", "")
+                title = e.get("title", "(No title)")
+                if start and end:
+                    if start == "12:00:00 AM" and (end == "12:00:00 AM" or "11:59" in end or "12:00:00 AM" in end):
+                        content += f"- {title} (All day)\n"
+                    else:
+                        content += f"- {start}–{end} {title}\n"
+                else:
+                    content += f"- {title}\n"
+        else:
+            content += "No meetings today.\n"
+        content += "\n"
+
+    digest_podcasts = None
+    total_episodes = 0
+    if is_podcast_digest_enabled():
+        digest_podcasts = get_podcast_digest(today)
+        if digest_podcasts:
+            total_episodes = sum(len(p['episodes']) for p in digest_podcasts)
+            content += "## Podcast Digest\n\n"
+            for podcast in digest_podcasts:
+                content += f"### {podcast['name']}\n\n"
+                for episode in podcast['episodes']:
+                    content += f"**{episode['title']}**\n\n"
+                    if episode['summary']:
+                        content += f"{episode['summary']}\n\n"
+            content += "\n"
+
     if ideas:
         content += "## In Progress Ideas\n"
         for filename in ideas:
@@ -251,6 +364,10 @@ def generate_today_md(dates):
 
     print(f"  - {len(overdue)} overdue task(s)")
     print(f"  - {len(due_today)} task(s) due today")
+    if is_apple_calendar_enabled() and get_today_events:
+        print(f"  - {len(events)} meeting(s)")
+    if is_podcast_digest_enabled() and digest_podcasts:
+        print(f"  - {total_episodes} episode(s) from {len(digest_podcasts)} podcast(s)")
     print(f"  - {len(research)} research task(s)")
     print(f"  - {len(ideas)} in-progress idea(s)")
 

@@ -21,3 +21,7 @@ links:
 
 integrations:
   research_system: false   # Set to true to include research digest in /today
+  apple_calendar: false    # Set to true to include today's Apple Calendar meetings in /today
+  # apple_calendar_calendars: ["Calendar", "Work"]  # Optional: limit to these calendars; omit to use all calendars
+  podcast_digest: false    # Set to true to include podcast digest in /today
+  # podcast_digest_path: "/path/to/podcast-ripper/transcripts/digests"  # Directory containing yyyy-mm-dd.md digest files
