@@ -11,6 +11,7 @@ This script:
 """
 
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timedelta
@@ -62,6 +63,49 @@ def calculate_weeks():
     print(f"This week: {dates['this_week_start']} to {dates['this_week_end']}")
     print(f"Next week: {dates['next_week_start']} to {dates['next_week_end']}")
     return dates
+
+def sync_completions_from_today(today_str):
+    """Read existing today.md for checked-off tasks and stamp their source files."""
+    today_file = BASE_DIR / "today.md"
+    if not today_file.exists():
+        return
+
+    text = today_file.read_text(encoding="utf-8")
+
+    link_format = get_link_format()
+    if link_format == "markdown":
+        pattern = re.compile(r'- \[[xX]\] \[([^\]]+)\]\(tasks/[^\)]+\)')
+    else:
+        pattern = re.compile(r'- \[[xX]\] \[\[([^\]]+)\]\]')
+
+    completed = pattern.findall(text)
+    if not completed:
+        return
+
+    stamped = []
+    for task_name in completed:
+        task_file = TASKS_DIR / f"{task_name}.md"
+        if not task_file.exists():
+            continue
+
+        content = task_file.read_text(encoding="utf-8")
+        if re.search(r'^completed:', content, re.MULTILINE):
+            continue
+
+        content = re.sub(
+            r'^(---\s*\n)',
+            f'\\1completed: {today_str}\n',
+            content,
+            count=1,
+        )
+        task_file.write_text(content, encoding="utf-8")
+        stamped.append(task_name)
+
+    if stamped:
+        print(f"\nSynced {len(stamped)} completion(s) from today.md:")
+        for name in stamped:
+            print(f"  - {name}")
+
 
 def archive_completed_tasks():
     """Run the archive-tasks.py script."""
@@ -313,6 +357,19 @@ def get_podcast_digest(today_str):  # pylint: disable=too-many-branches,too-many
     return podcasts if podcasts else None
 
 
+def _format_action_items(action_items_text):
+    """Return action-items text as checkable markdown task lines."""
+    lines = []
+    for item_line in action_items_text.split('\n'):
+        item_line = item_line.strip()
+        if not item_line:
+            continue
+        if item_line.startswith('- '):
+            item_line = item_line[2:]
+        lines.append(f"- [ ] {item_line}\n")
+    return "".join(lines)
+
+
 def generate_today_md(dates):
     """Generate today.md file."""
     print("\nGenerating today.md...")
@@ -378,13 +435,7 @@ def generate_today_md(dates):
                         content += f"{episode['summary']}\n\n"
                     if episode.get('action_items'):
                         content += "**Action Items**\n"
-                        for item_line in episode['action_items'].split('\n'):
-                            item_line = item_line.strip()
-                            if not item_line:
-                                continue
-                            if item_line.startswith('- '):
-                                item_line = item_line[2:]
-                            content += f"- [ ] {item_line}\n"
+                        content += _format_action_items(episode['action_items'])
                         content += "\n"
             content += "\n"
 
@@ -502,10 +553,13 @@ def main():
     # Step 2: Calculate weeks
     dates = calculate_weeks()
 
-    # Step 3: Archive completed tasks
+    # Step 3: Sync checkbox completions from today.md back to task files
+    sync_completions_from_today(dates['today'])
+
+    # Step 4: Archive completed tasks
     archive_completed_tasks()
 
-    # Step 4: Generate files
+    # Step 5: Generate files
     generate_today_md(dates)
     generate_this_week_md(dates)
     generate_next_week_md(dates)

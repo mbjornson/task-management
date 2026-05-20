@@ -296,6 +296,85 @@ class TestGetPodcastDigest:
         assert "Second paragraph" in summary
 
 
+class TestSyncCompletionsFromToday:
+    def test_stamps_checked_obsidian_task(self, tmp_path):
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        task_file = tasks_dir / "my-task.md"
+        task_file.write_text("---\ntype: task\ndue: 2026-01-01\n---\n# my task\n")
+
+        today_file = tmp_path / "today.md"
+        today_file.write_text("## Overdue\n- [x] [[my-task]] (due: 2026-01-01)\n")
+
+        with patch.object(gdf, "BASE_DIR", tmp_path), \
+             patch.object(gdf, "TASKS_DIR", tasks_dir), \
+             patch.object(gdf, "get_link_format", return_value="obsidian"):
+            gdf.sync_completions_from_today("2026-05-20")
+
+        content = task_file.read_text()
+        assert "completed: 2026-05-20" in content
+
+    def test_stamps_checked_markdown_task(self, tmp_path):
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        task_file = tasks_dir / "my-task.md"
+        task_file.write_text("---\ntype: task\ndue: 2026-01-01\n---\n# my task\n")
+
+        today_file = tmp_path / "today.md"
+        today_file.write_text("## Due Today\n- [x] [my-task](tasks/my-task.md)\n")
+
+        with patch.object(gdf, "BASE_DIR", tmp_path), \
+             patch.object(gdf, "TASKS_DIR", tasks_dir), \
+             patch.object(gdf, "get_link_format", return_value="markdown"):
+            gdf.sync_completions_from_today("2026-05-20")
+
+        content = task_file.read_text()
+        assert "completed: 2026-05-20" in content
+
+    def test_ignores_unchecked_tasks(self, tmp_path):
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        task_file = tasks_dir / "my-task.md"
+        original = "---\ntype: task\ndue: 2026-01-01\n---\n# my task\n"
+        task_file.write_text(original)
+
+        today_file = tmp_path / "today.md"
+        today_file.write_text("## Overdue\n- [ ] [[my-task]] (due: 2026-01-01)\n")
+
+        with patch.object(gdf, "BASE_DIR", tmp_path), \
+             patch.object(gdf, "TASKS_DIR", tasks_dir), \
+             patch.object(gdf, "get_link_format", return_value="obsidian"):
+            gdf.sync_completions_from_today("2026-05-20")
+
+        assert task_file.read_text() == original
+
+    def test_skips_already_completed_task(self, tmp_path):
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+        task_file = tasks_dir / "my-task.md"
+        original = "---\ncompleted: 2026-05-19\ntype: task\n---\n# my task\n"
+        task_file.write_text(original)
+
+        today_file = tmp_path / "today.md"
+        today_file.write_text("## Overdue\n- [x] [[my-task]] (due: 2026-01-01)\n")
+
+        with patch.object(gdf, "BASE_DIR", tmp_path), \
+             patch.object(gdf, "TASKS_DIR", tasks_dir), \
+             patch.object(gdf, "get_link_format", return_value="obsidian"):
+            gdf.sync_completions_from_today("2026-05-20")
+
+        assert task_file.read_text() == original
+
+    def test_no_today_file(self, tmp_path):
+        tasks_dir = tmp_path / "tasks"
+        tasks_dir.mkdir()
+
+        with patch.object(gdf, "BASE_DIR", tmp_path), \
+             patch.object(gdf, "TASKS_DIR", tasks_dir), \
+             patch.object(gdf, "get_link_format", return_value="obsidian"):
+            gdf.sync_completions_from_today("2026-05-20")
+
+
 class TestFormatLink:
     def test_obsidian_format(self):
         with patch.object(gdf, "get_link_format", return_value="obsidian"):

@@ -8,14 +8,17 @@ MCP server is not installed or fails, falls back to AppleScript on macOS.
 """
 
 import json
+import os
 import platform
 import re
+import signal
 import subprocess
 import sys
+import tempfile
 import threading
 from datetime import datetime
 
-MCP_TIMEOUT_SECONDS = 25
+MCP_TIMEOUT_SECONDS = 8
 
 # MCP server command (same as install-apple-calendar-mcp)
 MCP_COMMAND = ["npx", "-y", "@foxychat-mcp/apple-calendar"]
@@ -27,6 +30,7 @@ def _call_mcp_get_today_events():
     Returns list of dicts with start, end, title; or None on any failure.
     """
     result_holder = [None]  # mutable so inner thread can set it
+    proc_holder = [None]    # expose proc so outer scope can kill it on timeout
 
     def run_mcp():
         try:
@@ -36,9 +40,12 @@ def _call_mcp_get_today_events():
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                start_new_session=True,  # new process group so we can kill the whole tree
             )
         except FileNotFoundError:
             return
+
+        proc_holder[0] = proc
 
         def send(msg):
             proc.stdin.write(json.dumps(msg) + "\n")
@@ -98,18 +105,36 @@ def _call_mcp_get_today_events():
             pass
         finally:
             try:
-                proc.terminate()
-                proc.wait(timeout=2)
-            except (OSError, subprocess.TimeoutExpired):
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (OSError, ProcessLookupError):
                 try:
                     proc.kill()
                 except OSError:
                     pass
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
 
     t = threading.Thread(target=run_mcp, daemon=True)
     t.start()
     t.join(timeout=MCP_TIMEOUT_SECONDS)
     if t.is_alive():
+        # Thread is stuck (npx is hanging). Kill the entire process group so npx
+        # and all its children release Calendar.app before we fall back to AppleScript.
+        proc = proc_holder[0]
+        if proc:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
         return None  # timeout → fall back to AppleScript
     return result_holder[0]
 
@@ -173,11 +198,10 @@ def _get_all_calendar_names():
     if platform.system() != "Darwin":
         return []
     script = """
-set delim to character id 0
 tell application "Calendar"
     set out to ""
     repeat with cal in calendars
-        set out to out & (name of cal) & delim
+        set out to out & (name of cal) & "|"
     end repeat
     return out
 end tell
@@ -193,7 +217,7 @@ end tell
         return []
     if result.returncode != 0 or not result.stdout:
         return []
-    parts = (result.stdout or "").split("\x00")
+    parts = (result.stdout or "").split("|")
     return [p.strip() for p in parts if p.strip()]
 
 
@@ -202,61 +226,153 @@ def _get_today_events_applescript(calendar_names):
     if platform.system() != "Darwin" or not calendar_names:
         return []
 
-    today_start_script = """
+    def _esc(s):
+        return s.replace("\\", "\\\\").replace('"', '\\"')
+
+    cal_list = "{" + ", ".join(f'"{_esc(n)}"' for n in calendar_names) + "}"
+
+    # Single AppleScript call queries all calendars \u2014 avoids per-calendar subprocess overhead
+    # and the per-calendar timeout that breaks slow Exchange/iCloud calendars.
+    script = f"""
 set todayStart to (current date)
 set hours of todayStart to 0
 set minutes of todayStart to 0
 set seconds of todayStart to 0
 set todayEnd to todayStart + 86400
-"""
-    event_script_tpl = """
+set calNames to {cal_list}
 set tab to character id 9
 set newline to character id 10
 set output to ""
-""" + today_start_script + """
 tell application "Calendar"
-    try
-        set cal to calendar "%s"
-        set calEvents to (every event of cal whose start date >= todayStart and start date < todayEnd)
-        repeat with e in calEvents
-            set startStr to time string of (get start date of e)
-            set endStr to time string of (get end date of e)
-            set sum to summary of e
-            if sum is missing value then set sum to "(No title)"
-            set output to output & startStr & tab & endStr & tab & sum & newline
-        end repeat
-    end try
+    repeat with calName in calNames
+        try
+            set cal to calendar calName
+            set calEvents to (every event of cal whose start date >= todayStart and start date < todayEnd)
+            repeat with e in calEvents
+                set startStr to time string of (get start date of e)
+                set endStr to time string of (get end date of e)
+                set sum to summary of e
+                if sum is missing value then set sum to "(No title)"
+                set output to output & startStr & tab & endStr & tab & sum & newline
+            end repeat
+        end try
+    end repeat
 end tell
 return output
 """
+
     def norm(s):
         return (s or "").strip().replace("\u202f", " ")
 
+    # Write to temp file and run via bash — direct osascript subprocess blocks silently
+    # on Exchange/iCloud calendars due to macOS TCC permission scoping.
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".applescript", delete=False) as f:
+            f.write(script)
+            tmp_path = f.name
+        result = subprocess.run(
+            ["bash", "-c", f"osascript {tmp_path}"],
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return []
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+    if result.returncode != 0:
+        return []
+
     events = []
-    for cal_name in calendar_names:
-        script = event_script_tpl % (cal_name.replace("\\", "\\\\").replace('"', '\\"'),)
-        try:
-            result = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-        except (subprocess.TimeoutExpired, FileNotFoundError):
+    for line in (result.stdout or "").strip().split("\n"):
+        line = line.strip()
+        if not line:
             continue
-        if result.returncode != 0:
+        parts = line.split("\t", 2)
+        if len(parts) >= 3:
+            events.append({"start": norm(parts[0]), "end": norm(parts[1]), "title": norm(parts[2])})
+        elif len(parts) == 2:
+            events.append({"start": norm(parts[0]), "end": "", "title": norm(parts[1])})
+        else:
+            events.append({"start": "", "end": "", "title": norm(parts[0]) if parts else "(No title)"})
+
+    seen = set()
+    unique = []
+    for e in events:
+        key = (e.get("start"), e.get("end"), e.get("title"))
+        if key not in seen:
+            seen.add(key)
+            unique.append(e)
+    return unique
+
+
+def _get_today_events_all_calendars():
+    """Fetch today's events from ALL calendars in one AppleScript call via bash."""
+    if platform.system() != "Darwin":
+        return []
+
+    script = """
+set todayStart to (current date)
+set hours of todayStart to 0
+set minutes of todayStart to 0
+set seconds of todayStart to 0
+set todayEnd to todayStart + 86400
+set tab to character id 9
+set newline to character id 10
+set output to ""
+tell application "Calendar"
+    repeat with cal in calendars
+        try
+            set calEvents to (every event of cal whose start date >= todayStart and start date < todayEnd)
+            repeat with e in calEvents
+                set startStr to time string of (get start date of e)
+                set endStr to time string of (get end date of e)
+                set sum to summary of e
+                if sum is missing value then set sum to "(No title)"
+                set output to output & startStr & tab & endStr & tab & sum & newline
+            end repeat
+        end try
+    end repeat
+end tell
+return output
+"""
+
+    def norm(s):
+        return (s or "").strip().replace(" ", " ")
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".applescript", delete=False) as f:
+            f.write(script)
+            tmp_path = f.name
+        result = subprocess.run(
+            ["bash", "-c", f"osascript {tmp_path}"],
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return []
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+    if result.returncode != 0:
+        return []
+
+    events = []
+    for line in (result.stdout or "").strip().split("\n"):
+        line = line.strip()
+        if not line:
             continue
-        for line in (result.stdout or "").strip().split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split("\t", 2)
-            if len(parts) >= 3:
-                events.append({"start": norm(parts[0]), "end": norm(parts[1]), "title": norm(parts[2])})
-            elif len(parts) == 2:
-                events.append({"start": norm(parts[0]), "end": "", "title": norm(parts[1])})
-            else:
-                events.append({"start": "", "end": "", "title": norm(parts[0]) if parts else "(No title)"})
+        parts = line.split("\t", 2)
+        if len(parts) >= 3:
+            events.append({"start": norm(parts[0]), "end": norm(parts[1]), "title": norm(parts[2])})
+        elif len(parts) == 2:
+            events.append({"start": norm(parts[0]), "end": "", "title": norm(parts[1])})
+        else:
+            events.append({"start": "", "end": "", "title": norm(parts[0]) if parts else "(No title)"})
 
     seen = set()
     unique = []
@@ -305,10 +421,11 @@ def get_today_events(calendar_names=None):
     # Fallback: AppleScript on macOS
     if platform.system() != "Darwin":
         return []
-    if calendar_names is None or len(calendar_names) == 0:
-        calendar_names = _get_all_calendar_names()
-    if not calendar_names:
-        calendar_names = ("Calendar", "Work", "Home")
-    events = _get_today_events_applescript(calendar_names)
+    if calendar_names:
+        events = _get_today_events_applescript(calendar_names)
+    else:
+        # No specific list configured — query all calendars in one AppleScript call,
+        # bypassing _get_all_calendar_names() which can fail when Calendar.app is busy.
+        events = _get_today_events_all_calendars()
     _sort_events(events)
     return events
