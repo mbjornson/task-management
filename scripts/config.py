@@ -55,3 +55,33 @@ def is_research_system_enabled():
     """Return True if research-system integration is enabled."""
     config = get_config()
     return config.get("integrations", {}).get("research_system", False)
+
+
+def is_apple_calendar_enabled():
+    """Return True if Apple Calendar integration is enabled."""
+    config = get_config()
+    return config.get("integrations", {}).get("apple_calendar", False)
+
+
+def get_apple_calendar_calendars():
+    """Return list of calendar names to query, or None to mean 'all calendars' (recommended)."""
+    config = get_config()
+    names = config.get("integrations", {}).get("apple_calendar_calendars")
+    if names is not None and isinstance(names, list) and len(names) > 0:
+        return [str(n) for n in names]
+    return None  # None = query all calendars (fetched from Calendar.app)
+
+
+def is_podcast_digest_enabled():
+    """Return True if podcast digest integration is enabled."""
+    config = get_config()
+    return config.get("integrations", {}).get("podcast_digest", False)
+
+
+def get_podcast_digest_path():
+    """Return the path to the podcast digests directory, or None if not set."""
+    config = get_config()
+    path = config.get("integrations", {}).get("podcast_digest_path")
+    if path:
+        return Path(path)
+    return None

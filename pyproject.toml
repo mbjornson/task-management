@@ -1,0 +1,40 @@
+[project]
+name = "task-management"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = ["pyyaml"]
+
+[project.optional-dependencies]
+dev = ["pytest", "pylint"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["scripts"]
+
+[tool.pylint.main]
+ignore-patterns = ["test_.*"]
+
+[tool.pylint."messages control"]
+disable = [
+    "missing-module-docstring",
+    "missing-class-docstring",
+    "missing-function-docstring",
+    "too-few-public-methods",
+    "invalid-name",
+    "unused-variable",
+    "unused-import",
+    "subprocess-run-check",
+    "no-else-return",
+    "consider-using-with",
+    "wrong-import-order",
+    "too-many-branches",
+    "too-many-statements",
+    "too-many-locals",
+    "too-many-return-statements",
+    "unsupported-assignment-operation",
+    "unsubscriptable-object",
+    "unspecified-encoding",
+]
+
+[tool.pylint.format]
+max-line-length = 120

@@ -49,6 +49,16 @@ ls ~/.claude/plugins/research-system 2>/dev/null || ls -d ~/*/cc-plugins/researc
 
 If found, ask the user if they want to enable the research-system integration (adds research digest to /today output).
 
+### Step 4b: Ask About Apple Calendar Integration
+
+Ask if the user wants to enable Apple Calendar integration (today's meetings in today.md via Apple Calendar MCP). If yes, set `apple_calendar: true`. Then offer to install the Apple Calendar MCP server by running:
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/install-apple-calendar-mcp.py
+```
+
+If they already have an Apple Calendar MCP configured in Cursor, skip the install. After install, remind them to reload MCP (or restart Cursor) and, on macOS, to grant Cursor Full Disk Access (or Calendar access) if needed.
+
 ### Step 5: Validate Path
 
 Verify the tasks root path exists:
@@ -87,6 +97,7 @@ links:
 
 integrations:
   research_system: <true or false>
+  apple_calendar: <true or false>
 ```
 
 ### Step 8: Verify Setup

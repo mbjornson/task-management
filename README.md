@@ -36,6 +36,7 @@ links:
 
 integrations:
   research_system: false   # Set to true to include research digest in /today
+  apple_calendar: false    # Set to true to include today's Apple Calendar meetings in /today
 ```
 
 ### Link Format
@@ -51,16 +52,24 @@ Choose "obsidian" if you use Obsidian or another wiki-link aware editor. Choose 
 
 If you have the `research-system` plugin installed and want `/today` to include a research digest section, set `integrations.research_system: true`.
 
+### Apple Calendar Integration
+
+When `integrations.apple_calendar` is `true`, the script fills the **Meetings** section of today.md with today's events from Apple Calendar every time `generate-daily-files.py` runs (e.g. via `/task-management:today`, cron, or CLI). By default **all** calendars are queried so no events are missed. On macOS it uses AppleScript to read Calendar.app; grant Calendar access to Terminal (or the process running the script) if prompted. Optional: set `integrations.apple_calendar_calendars` to a list of calendar names to limit which calendars are queried (e.g. to avoid timeouts on very large calendars). The **Apple Calendar MCP** (install with `/task-management:install-apple-calendar-mcp`) is optional and used for other calendar features in Cursor if you want them.
+
 ## Commands
 
 ### `/task-management:setup`
 
 Interactive setup wizard to configure your tasks root folder and directory structure.
 
+### `/task-management:install-apple-calendar-mcp`
+
+Install the Apple Calendar MCP server into your MCP config so the plugin and your MCP client can use it. Does not assume Cursor: use `MCP_CONFIG_PATH` or `--path` to choose the config file; use `--print-only` to print the JSON and common paths without writing. Run once; then reload MCP and grant Calendar/Full Disk Access on macOS if needed.
+
 ### `/task-management:today`
 
 Generate daily task files:
-- `today.md` - Overdue tasks, tasks due today, in-progress ideas
+- `today.md` - Overdue tasks, tasks due today, meetings (from Apple Calendar when enabled), in-progress ideas
 - `this-week.md` - Tasks for remaining days this week
 - `next-week.md` - Tasks for next week
 
