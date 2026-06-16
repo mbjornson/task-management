@@ -1,0 +1,14 @@
+{
+  "name": "mbjornson",
+  "owner": {
+    "name": "mbjornson",
+    "email": "mbjornson@icloud.com"
+  },
+  "plugins": [
+    {
+      "name": "task-management",
+      "source": "./",
+      "description": "Markdown-based task management with daily/weekly views, archiving, and idea tracking"
+    }
+  ]
+}

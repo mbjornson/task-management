@@ -5,8 +5,12 @@ A Claude Code plugin for markdown-based task management. Generates daily/weekly 
 ## Installation
 
 ```bash
-claude plugins add teresa-torres-plugins/task-management
+# Add this repo as a plugin marketplace, then install the plugin from it
+claude plugin marketplace add mbjornson/task-management
+claude plugin install task-management@mbjornson
 ```
+
+`mbjornson/task-management` is the GitHub `owner/repo`; the `@mbjornson` suffix is the marketplace **name** defined in `.claude-plugin/marketplace.json` (see [Publishing to a marketplace](#publishing-to-a-marketplace)). Inside an active Claude Code session, use the slash-command equivalents `/plugin marketplace add mbjornson/task-management` and `/plugin install task-management@mbjornson`.
 
 After installation, run the setup wizard:
 
@@ -153,6 +157,55 @@ Task content here.
 - `recurrence: weekly | biweekly | monthly | quarterly | yearly`
 - `status: in-progress | noodling | someday` - For ideas only
 - `tags: [tag1, tag2]` - Categorization
+
+## Publishing to a marketplace
+
+This repo ships a plugin manifest (`.claude-plugin/plugin.json`), but a plugin only becomes installable when it is **listed in a marketplace**. A marketplace is just a git repo containing a `.claude-plugin/marketplace.json` catalog. One repo can act as both the marketplace **and** the plugin source — which is how this repo is set up.
+
+### 1. Add the marketplace catalog
+
+Create `.claude-plugin/marketplace.json` at the repo root:
+
+```json
+{
+  "name": "mbjornson",
+  "owner": {
+    "name": "mbjornson"
+  },
+  "plugins": [
+    {
+      "name": "task-management",
+      "source": "./",
+      "description": "Markdown-based task management with daily/weekly views, archiving, and idea tracking"
+    }
+  ]
+}
+```
+
+- `name` is the marketplace identifier users reference as `@mbjornson` when installing. It does **not** have to match the GitHub owner — keep it stable, because changing it breaks existing installs.
+- `source: "./"` points at the repo root, where this plugin's `.claude-plugin/plugin.json` lives. For a multi-plugin marketplace, give each entry its own subdirectory path (e.g. `"./plugins/task-management"`) or a `{ "source": "github", "repo": "owner/repo" }` object.
+
+### 2. Publish
+
+Commit and push to the default branch on GitHub:
+
+```bash
+git add .claude-plugin/marketplace.json
+git commit -m "Add marketplace catalog"
+git push
+```
+
+The plugin is now installable by anyone using the [Installation](#installation) commands above.
+
+### 3. Shipping updates
+
+Bump `version` in `.claude-plugin/plugin.json` and push. End users pull the new version with:
+
+```bash
+claude plugin marketplace update mbjornson
+```
+
+Because `plugin.json` sets an explicit `version`, users only receive an update when that field changes. (If `version` were omitted, every pushed commit would count as a new version.)
 
 ## License
 
