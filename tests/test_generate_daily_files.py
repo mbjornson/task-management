@@ -415,3 +415,63 @@ class TestGenerateDaysBetween:
     def test_empty_range(self):
         days = gdf.generate_days_between("2026-05-20", "2026-05-19")
         assert len(days) == 0
+
+
+class TestPodcastDigestFallback:
+    """A missing/late today-digest should fall back to the most recent one
+    instead of silently dropping the Podcast Digest section."""
+
+    @staticmethod
+    def _digest(date_str, podcast="Pod", episode="Ep", summary="A summary."):
+        return textwrap.dedent(f"""\
+            ---
+            type: digest
+            date: {date_str}
+            ---
+
+            # Daily Digest — {date_str}
+
+            ## {podcast}
+
+            ### {episode}
+
+            **Summary**
+
+            {summary}
+        """)
+
+    def test_falls_back_to_latest_when_today_missing(self, tmp_path):
+        (tmp_path / "2026-05-10.md").write_text(self._digest("2026-05-10", podcast="Old Pod"))
+        (tmp_path / "2026-05-12.md").write_text(self._digest("2026-05-12", podcast="Newer Pod"))
+        with patch.object(gdf, "get_podcast_digest_path", return_value=tmp_path):
+            result = gdf.get_podcast_digest("2026-05-19")
+        assert result is not None
+        assert result[0]["name"] == "Newer Pod"
+
+    def test_fallback_ignores_non_date_files(self, tmp_path):
+        (tmp_path / "dashboard.md").write_text("# Dashboard\n\n## Not a digest\n")
+        (tmp_path / "2026-05-12.md").write_text(self._digest("2026-05-12", podcast="Real Digest"))
+        with patch.object(gdf, "get_podcast_digest_path", return_value=tmp_path):
+            result = gdf.get_podcast_digest("2026-05-19")
+        assert result[0]["name"] == "Real Digest"
+
+    def test_today_takes_precedence_over_older(self, tmp_path):
+        (tmp_path / "2026-05-12.md").write_text(self._digest("2026-05-12", podcast="Older"))
+        (tmp_path / "2026-05-19.md").write_text(self._digest("2026-05-19", podcast="Today"))
+        with patch.object(gdf, "get_podcast_digest_path", return_value=tmp_path):
+            result = gdf.get_podcast_digest("2026-05-19")
+        assert result[0]["name"] == "Today"
+
+    def test_digest_date_is_today_when_present(self, tmp_path):
+        (tmp_path / "2026-05-19.md").write_text(self._digest("2026-05-19"))
+        with patch.object(gdf, "get_podcast_digest_path", return_value=tmp_path):
+            assert gdf.get_podcast_digest_date("2026-05-19") == "2026-05-19"
+
+    def test_digest_date_is_fallback_when_today_missing(self, tmp_path):
+        (tmp_path / "2026-05-12.md").write_text(self._digest("2026-05-12"))
+        with patch.object(gdf, "get_podcast_digest_path", return_value=tmp_path):
+            assert gdf.get_podcast_digest_date("2026-05-19") == "2026-05-12"
+
+    def test_digest_date_none_when_no_digests(self, tmp_path):
+        with patch.object(gdf, "get_podcast_digest_path", return_value=tmp_path):
+            assert gdf.get_podcast_digest_date("2026-05-19") is None

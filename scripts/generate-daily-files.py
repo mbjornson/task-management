@@ -258,14 +258,45 @@ def format_link(filename, folder=None):
         # Default to obsidian wiki-links
         return f"[[{filename}]]"
 
-def get_podcast_digest(today_str):  # pylint: disable=too-many-branches,too-many-statements
-    """Parse today's podcast digest file and return structured data."""
+_DIGEST_FILE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.md$")
+
+
+def _resolve_digest_file(today_str):
+    """Return today's digest file if present, else the most recent dated digest.
+
+    Falling back keeps the Podcast Digest section populated when the ripper's
+    run is late or never finished (its digest is written at end-of-run). Only
+    files named YYYY-MM-DD.md are considered, so dashboard.md / *.html in the
+    same folder are ignored.
+    """
     digest_path = get_podcast_digest_path()
-    if not digest_path:
+    if not digest_path or not digest_path.exists():
         return None
 
-    digest_file = digest_path / f"{today_str}.md"
-    if not digest_file.exists():
+    today_file = digest_path / f"{today_str}.md"
+    if today_file.exists():
+        return today_file
+
+    dated = sorted(
+        (p for p in digest_path.glob("*.md") if _DIGEST_FILE_RE.match(p.name)),
+        key=lambda p: p.stem,
+    )
+    return dated[-1] if dated else None
+
+
+def get_podcast_digest_date(today_str):
+    """Date (YYYY-MM-DD) of the digest get_podcast_digest would use, or None.
+
+    Lets the caller flag a stale fallback (source date != today) in the heading.
+    """
+    digest_file = _resolve_digest_file(today_str)
+    return digest_file.stem if digest_file else None
+
+
+def get_podcast_digest(today_str):  # pylint: disable=too-many-branches,too-many-statements
+    """Parse the relevant podcast digest file (today's, or latest fallback)."""
+    digest_file = _resolve_digest_file(today_str)
+    if not digest_file:
         return None
 
     with open(digest_file, encoding="utf-8") as f:
@@ -426,7 +457,12 @@ def generate_today_md(dates):
         digest_podcasts = get_podcast_digest(today)
         if digest_podcasts:
             total_episodes = sum(len(p['episodes']) for p in digest_podcasts)
-            content += "## Podcast Digest\n\n"
+            source_date = get_podcast_digest_date(today)
+            if source_date and source_date != today:
+                # Fell back to an older digest — flag it so the staleness is visible.
+                content += f"## Podcast Digest (from {source_date})\n\n"
+            else:
+                content += "## Podcast Digest\n\n"
             for podcast in digest_podcasts:
                 content += f"### {podcast['name']}\n\n"
                 for episode in podcast['episodes']:
