@@ -1,6 +1,6 @@
 {
   "name": "task-management",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Markdown-based task management with daily/weekly views, archiving, and idea tracking",
   "author": {
     "name": "mbjornson",
