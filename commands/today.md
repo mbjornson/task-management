@@ -25,7 +25,7 @@ This script will:
 
 When `integrations.apple_calendar` is `true`, the script fetches today's events from Apple Calendar (via AppleScript on macOS) and writes the **## Meetings** section (after Due Today, before In Progress Ideas). This happens every time the script runs—whether from `/today`, cron, or the command line.
 
-When `integrations.podcast_digest` is `true` and `integrations.podcast_digest_path` points to a directory containing `yyyy-mm-dd.md` digest files, the script reads today's digest and writes a **## Podcast Digest** section (after Meetings, before In Progress Ideas) with podcast names, episode titles, and summaries.
+When `integrations.podcast_digest` is `true` and `integrations.podcast_digest_path` points to a directory containing `yyyy-mm-dd.md` digest files, the script reads today's digest and writes a **## Podcast Digest** section (after Meetings, before In Progress Ideas) with podcast names, episode titles, and summaries. If today's digest is missing (e.g. the source hasn't finished its run yet), it falls back to the most recent dated digest and flags the staleness in the heading: **## Podcast Digest (from yyyy-mm-dd)**.
 
 ### Step 2: Generate Research Digest (Optional)
 
