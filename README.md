@@ -1,6 +1,6 @@
 # task-management
 
-A Claude Code plugin for markdown-based task management. Generates daily/weekly task views, archives completed tasks, and tracks ideas.
+A Claude Code plugin for markdown-based task management. Generates daily/weekly task views, archives completed tasks, and tracks ideas. This was forked from teresa-torres-plugins/task-management. 
 
 ## Installation
 
