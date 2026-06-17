@@ -139,6 +139,22 @@ def _call_mcp_get_today_events():
     return result_holder[0]
 
 
+def _extract_time(value):
+    """Pull a 'H:MM[:SS] AM/PM' time-of-day out of an MCP date/time string.
+
+    The foxychat server emits full datetimes like
+    "Wednesday, June 17, 2026 at 11:00:00 AM"; take the part after ' at ' and
+    match the clock time. Plain time strings ("9:00 AM") pass through unchanged.
+    """
+    if not value:
+        return ""
+    value = str(value)
+    if " at " in value:
+        value = value.rsplit(" at ", 1)[1]
+    m = re.search(r"\d{1,2}:\d{2}(?::\d{2})?\s*[AP]M", value)
+    return m.group(0).strip() if m else value.strip()
+
+
 def _parse_mcp_events_text(text):
     """
     Parse MCP tool output into list of {start, end, title}.
@@ -152,9 +168,13 @@ def _parse_mcp_events_text(text):
             out = []
             for item in data:
                 if isinstance(item, dict):
+                    # Server key drift: real foxychat output uses
+                    # startDate/endDate/summary, not start/end/title.
+                    start = item.get("start", item.get("startTime", item.get("startDate", "")))
+                    end = item.get("end", item.get("endTime", item.get("endDate", "")))
                     out.append({
-                        "start": str(item.get("start", item.get("startTime", ""))),
-                        "end": str(item.get("end", item.get("endTime", ""))),
+                        "start": _extract_time(start),
+                        "end": _extract_time(end),
                         "title": str(item.get("title", item.get("summary", "(No title)"))),
                     })
                 elif isinstance(item, str):
@@ -406,26 +426,35 @@ def get_today_events(calendar_names=None):
     """
     Return today's events from Apple Calendar as a list of dicts with start, end, title.
 
-    Uses the Apple Calendar MCP server (npx @foxychat-mcp/apple-calendar) when
-    available; if not installed or the call fails, falls back to AppleScript on macOS.
+    On macOS, AppleScript is authoritative: it queries every calendar and returns
+    correct start/end times. The MCP server (npx @foxychat-mcp/apple-calendar) only
+    sees a subset of calendars (e.g. just "Siri Suggestions") and can return [] even
+    when real meetings exist, so it is a fallback — used when AppleScript finds nothing
+    or when not on macOS.
 
-    calendar_names: used only for AppleScript fallback. If None/empty, all calendars
-                    are queried in fallback mode.
+    calendar_names: specific calendars for the AppleScript query. If None/empty, all
+                    calendars are queried.
     """
-    # Prefer MCP (no dependency on Cursor or any client)
-    events = _call_mcp_get_today_events()
-    if events is not None:
-        _sort_events(events)
-        return events
-
-    # Fallback: AppleScript on macOS
-    if platform.system() != "Darwin":
+    if platform.system() == "Darwin":
+        if calendar_names:
+            events = _get_today_events_applescript(calendar_names)
+        else:
+            # No specific list configured — query all calendars in one AppleScript call,
+            # bypassing _get_all_calendar_names() which can fail when Calendar.app is busy.
+            events = _get_today_events_all_calendars()
+        if events:
+            _sort_events(events)
+            return events
+        # AppleScript found nothing — try MCP before giving up.
+        mcp_events = _call_mcp_get_today_events()
+        if mcp_events:
+            _sort_events(mcp_events)
+            return mcp_events
         return []
-    if calendar_names:
-        events = _get_today_events_applescript(calendar_names)
-    else:
-        # No specific list configured — query all calendars in one AppleScript call,
-        # bypassing _get_all_calendar_names() which can fail when Calendar.app is busy.
-        events = _get_today_events_all_calendars()
-    _sort_events(events)
-    return events
+
+    # Non-macOS: MCP is the only source.
+    mcp_events = _call_mcp_get_today_events()
+    if mcp_events is None:
+        return []
+    _sort_events(mcp_events)
+    return mcp_events

@@ -22,6 +22,7 @@ from config import (
     get_tasks_root, get_folder, get_link_format,
     is_apple_calendar_enabled, get_apple_calendar_calendars,
     is_podcast_digest_enabled, get_podcast_digest_path,
+    get_podcast_digest_refresh_cmd,
 )
 from dates import get_week_dates
 
@@ -258,37 +259,50 @@ def format_link(filename, folder=None):
         # Default to obsidian wiki-links
         return f"[[{filename}]]"
 
-_DIGEST_FILE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.md$")
+# The refresh command imports faster_whisper and rebuilds today's digest from
+# metrics; give it room but never let it hang /today.
+DIGEST_REFRESH_TIMEOUT = 180
+
+
+def refresh_podcast_digest():
+    """Run the configured refresh command to materialize today's digest on demand.
+
+    No-op when unconfigured. Best-effort: a timeout/failure is reported and
+    swallowed so /today still renders (with the 'not ready yet' placeholder).
+    """
+    cmd = get_podcast_digest_refresh_cmd()
+    if not cmd:
+        return
+    try:
+        result = subprocess.run(
+            cmd, shell=True, capture_output=True, text=True,
+            timeout=DIGEST_REFRESH_TIMEOUT,
+        )
+        if result.returncode != 0:
+            print(f"Podcast digest refresh exited {result.returncode}: {result.stderr.strip()}",
+                  file=sys.stderr)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        print(f"Podcast digest refresh failed: {e}", file=sys.stderr)
 
 
 def _resolve_digest_file(today_str):
-    """Return today's digest file if present, else the most recent dated digest.
+    """Return today's digest file if present, else None.
 
-    Falling back keeps the Podcast Digest section populated when the ripper's
-    run is late or never finished (its digest is written at end-of-run). Only
-    files named YYYY-MM-DD.md are considered, so dashboard.md / *.html in the
-    same folder are ignored.
+    Only today's digest counts: /today must reflect today's rips, never an
+    older day's. When today's file is missing (the ripper's run is still going
+    or never finished), the caller shows a "not ready yet" placeholder rather
+    than a stale fallback.
     """
     digest_path = get_podcast_digest_path()
     if not digest_path or not digest_path.exists():
         return None
 
     today_file = digest_path / f"{today_str}.md"
-    if today_file.exists():
-        return today_file
-
-    dated = sorted(
-        (p for p in digest_path.glob("*.md") if _DIGEST_FILE_RE.match(p.name)),
-        key=lambda p: p.stem,
-    )
-    return dated[-1] if dated else None
+    return today_file if today_file.exists() else None
 
 
 def get_podcast_digest_date(today_str):
-    """Date (YYYY-MM-DD) of the digest get_podcast_digest would use, or None.
-
-    Lets the caller flag a stale fallback (source date != today) in the heading.
-    """
+    """Date (YYYY-MM-DD) of the digest get_podcast_digest would use, or None."""
     digest_file = _resolve_digest_file(today_str)
     return digest_file.stem if digest_file else None
 
@@ -389,14 +403,19 @@ def get_podcast_digest(today_str):  # pylint: disable=too-many-branches,too-many
 
 
 def _format_action_items(action_items_text):
-    """Return action-items text as checkable markdown task lines."""
+    """Return action-items text as checkable markdown task lines.
+
+    Digest action items already arrive as markdown tasks ("- [ ] …"); strip a
+    leading bullet and any existing checkbox marker before adding one, so we
+    never emit a double "- [ ] [ ]". Plain bullets and bare text also work.
+    """
     lines = []
     for item_line in action_items_text.split('\n'):
         item_line = item_line.strip()
         if not item_line:
             continue
-        if item_line.startswith('- '):
-            item_line = item_line[2:]
+        item_line = re.sub(r'^[-*]\s+', '', item_line)       # leading bullet
+        item_line = re.sub(r'^\[[ xX]\]\s*', '', item_line)  # existing checkbox
         lines.append(f"- [ ] {item_line}\n")
     return "".join(lines)
 
@@ -454,15 +473,13 @@ def generate_today_md(dates):
     digest_podcasts = None
     total_episodes = 0
     if is_podcast_digest_enabled():
+        # Materialize today's digest on demand (e.g. the ripper's `rip.py --digest`)
+        # so we show today's episodes-so-far rather than waiting for the full rip.
+        refresh_podcast_digest()
         digest_podcasts = get_podcast_digest(today)
+        content += "## Podcast Digest\n\n"
         if digest_podcasts:
             total_episodes = sum(len(p['episodes']) for p in digest_podcasts)
-            source_date = get_podcast_digest_date(today)
-            if source_date and source_date != today:
-                # Fell back to an older digest — flag it so the staleness is visible.
-                content += f"## Podcast Digest (from {source_date})\n\n"
-            else:
-                content += "## Podcast Digest\n\n"
             for podcast in digest_podcasts:
                 content += f"### {podcast['name']}\n\n"
                 for episode in podcast['episodes']:
@@ -473,7 +490,10 @@ def generate_today_md(dates):
                         content += "**Action Items**\n"
                         content += _format_action_items(episode['action_items'])
                         content += "\n"
-            content += "\n"
+        else:
+            # No stale fallback — today's rip just isn't done yet.
+            content += "Today's digest not ready yet.\n\n"
+        content += "\n"
 
     if ideas:
         content += "## In Progress Ideas\n"

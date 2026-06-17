@@ -25,3 +25,4 @@ integrations:
   # apple_calendar_calendars: ["Calendar", "Work"]  # Optional: limit to these calendars; omit to use all calendars
   podcast_digest: false    # Set to true to include podcast digest in /today
   # podcast_digest_path: "/path/to/podcast-ripper/transcripts/digests"  # Directory containing yyyy-mm-dd.md digest files
+  # podcast_digest_refresh_cmd: "/path/to/python3 /path/to/rip.py --digest"  # Optional: run before reading to materialize today's digest on demand (only today's is used — no stale fallback)
