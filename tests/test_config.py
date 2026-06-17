@@ -78,6 +78,19 @@ def test_get_apple_calendar_calendars_list():
         assert config.get_apple_calendar_calendars() == ["Work", "Personal"]
 
 
+def test_get_podcast_digest_refresh_cmd_set():
+    cfg = {**SAMPLE_CONFIG, "integrations": {
+        **SAMPLE_CONFIG["integrations"],
+        "podcast_digest_refresh_cmd": "python3 /x/rip.py --digest",
+    }}
+    with patch.object(config, "get_config", return_value=cfg):
+        assert config.get_podcast_digest_refresh_cmd() == "python3 /x/rip.py --digest"
+
+
+def test_get_podcast_digest_refresh_cmd_none(mock_config):
+    assert config.get_podcast_digest_refresh_cmd() is None
+
+
 def test_config_file_not_found():
     with patch.object(config, "CONFIG_FILE", Path("/nonexistent/config.yaml")):
         with pytest.raises(FileNotFoundError):

@@ -313,3 +313,69 @@ class TestMcpKillsProcessGroupOnTimeout:
             result = _call_mcp_get_today_events()
 
         assert result == []
+
+
+# ─── AppleScript is the primary source on macOS; MCP is fallback only ────────
+
+
+class TestAppleScriptIsPrimaryOnDarwin:
+    """The MCP server only sees a subset of calendars (e.g. just 'Siri
+    Suggestions') and can return [] even when real meetings exist. AppleScript
+    queries all calendars and returns times correctly, so on macOS it must run
+    first; MCP is only a fallback (non-macOS, or when AppleScript finds nothing)."""
+
+    def test_applescript_runs_first_and_mcp_not_called_when_events_found(self):
+        events = [{"start": "11:00:00 AM", "end": "12:00:00 PM", "title": "Catalyst Check-in"}]
+        with patch("platform.system", return_value="Darwin"), \
+             patch.object(calendar_apple, "_get_today_events_all_calendars", return_value=events) as mock_as, \
+             patch.object(calendar_apple, "_call_mcp_get_today_events") as mock_mcp:
+            result = calendar_apple.get_today_events(None)
+        assert result == events
+        mock_as.assert_called_once()
+        mock_mcp.assert_not_called()
+
+    def test_falls_back_to_mcp_when_applescript_returns_empty(self):
+        mcp_events = [{"start": "9:00:00 AM", "end": "9:30:00 AM", "title": "Standup"}]
+        with patch("platform.system", return_value="Darwin"), \
+             patch.object(calendar_apple, "_get_today_events_all_calendars", return_value=[]), \
+             patch.object(calendar_apple, "_call_mcp_get_today_events", return_value=mcp_events) as mock_mcp:
+            result = calendar_apple.get_today_events(None)
+        assert result == mcp_events
+        mock_mcp.assert_called_once()
+
+    def test_uses_configured_calendars_for_applescript_first(self):
+        events = [{"start": "2:00:00 PM", "end": "3:00:00 PM", "title": "Client call"}]
+        with patch("platform.system", return_value="Darwin"), \
+             patch.object(calendar_apple, "_get_today_events_applescript", return_value=events) as mock_as, \
+             patch.object(calendar_apple, "_call_mcp_get_today_events") as mock_mcp:
+            result = calendar_apple.get_today_events(["Work"])
+        assert result == events
+        mock_as.assert_called_once_with(["Work"])
+        mock_mcp.assert_not_called()
+
+    def test_non_darwin_uses_mcp(self):
+        mcp_events = [{"start": "9:00:00 AM", "end": "9:30:00 AM", "title": "Standup"}]
+        with patch("platform.system", return_value="Linux"), \
+             patch.object(calendar_apple, "_call_mcp_get_today_events", return_value=mcp_events) as mock_mcp:
+            result = calendar_apple.get_today_events(None)
+        assert result == mcp_events
+        mock_mcp.assert_called_once()
+
+
+class TestMcpParsesRealServerKeys:
+    """The foxychat apple-calendar server emits keys startDate/endDate/summary
+    with full datetime strings, e.g. 'Wednesday, June 17, 2026 at 11:00:00 AM'.
+    The parser must extract the time-of-day so meetings show with times."""
+
+    def test_parses_startdate_enddate_summary(self):
+        text = (
+            '[{"summary":"Catalyst Check-in",'
+            '"startDate":"Wednesday, June 17, 2026 at 11:00:00 AM",'
+            '"endDate":"Wednesday, June 17, 2026 at 12:00:00 PM",'
+            '"allDay":false}]'
+        )
+        events = calendar_apple._parse_mcp_events_text(text)
+        assert len(events) == 1
+        assert events[0]["title"] == "Catalyst Check-in"
+        assert events[0]["start"] == "11:00:00 AM"
+        assert events[0]["end"] == "12:00:00 PM"

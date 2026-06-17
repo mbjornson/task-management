@@ -85,3 +85,15 @@ def get_podcast_digest_path():
     if path:
         return Path(path)
     return None
+
+
+def get_podcast_digest_refresh_cmd():
+    """Return the shell command that materializes today's digest, or None.
+
+    Run before reading the digest so /today reflects episodes already ripped
+    today (e.g. the ripper's `rip.py --digest`, which rebuilds today's digest
+    file from completed episodes) instead of waiting for the full rip to finish.
+    """
+    config = get_config()
+    cmd = config.get("integrations", {}).get("podcast_digest_refresh_cmd")
+    return cmd if cmd else None
