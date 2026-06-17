@@ -41,6 +41,9 @@ links:
 integrations:
   research_system: false   # Set to true to include research digest in /today
   apple_calendar: false    # Set to true to include today's Apple Calendar meetings in /today
+  podcast_digest: false    # Set to true to include today's podcast digest in /today
+  # podcast_digest_path: "/path/to/ai-podcast-ripper/transcripts/digests"          # Directory of YYYY-MM-DD.md digest files
+  # podcast_digest_refresh_cmd: "/path/to/python3 /path/to/ai-podcast-ripper/rip.py --digest"  # Optional: materialize today's digest on demand before reading
 ```
 
 ### Link Format
@@ -60,6 +63,28 @@ If you have the `research-system` plugin installed and want `/today` to include 
 
 When `integrations.apple_calendar` is `true`, the script fills the **Meetings** section of today.md with today's events from Apple Calendar every time `generate-daily-files.py` runs (e.g. via `/task-management:today`, cron, or CLI). By default **all** calendars are queried so no events are missed. On macOS it uses AppleScript to read Calendar.app; grant Calendar access to Terminal (or the process running the script) if prompted. Optional: set `integrations.apple_calendar_calendars` to a list of calendar names to limit which calendars are queried (e.g. to avoid timeouts on very large calendars). The **Apple Calendar MCP** (install with `/task-management:install-apple-calendar-mcp`) is optional and used for other calendar features in Cursor if you want them.
 
+### Podcast Digest Integration
+
+When `integrations.podcast_digest` is `true`, `/today` adds a **Podcast Digest** section to today.md summarizing the podcasts you listened to (or had transcribed) today. The digests are produced by the companion [**ai-podcast-ripper**](https://github.com/mbjornson/ai-podcast-ripper) project — a local pipeline that fetches new episodes from your RSS feeds, transcribes them with Faster Whisper, summarizes them with a local LLM via Ollama, and writes one `YYYY-MM-DD.md` digest file per day. It runs entirely locally, with no external APIs, and is **not** a Claude Code plugin — it's a separate tool you run on a schedule (e.g. a nightly launchd/cron job).
+
+Point the plugin at the ripper's digest output directory:
+
+```yaml
+integrations:
+  podcast_digest: true
+  podcast_digest_path: "/path/to/ai-podcast-ripper/transcripts/digests"
+  # Optional — see below
+  podcast_digest_refresh_cmd: "/path/to/python3 /path/to/ai-podcast-ripper/rip.py --digest"
+```
+
+Behavior:
+
+- **Today only.** Only today's `YYYY-MM-DD.md` digest is used — it never falls back to an older day's digest, so `/today` always reflects today's episodes (never yesterday's).
+- **On-demand refresh (optional).** The ripper writes its digest file at the end of its run, so a long overnight rip may not have today's file ready when you run `/today` in the morning. If `podcast_digest_refresh_cmd` is set, the plugin runs it first to materialize today's digest from already-completed episodes — the ripper's `rip.py --digest` rebuilds the day's digest from its per-episode metrics without re-transcribing anything. This is best-effort: failures are ignored so `/today` still renders.
+- **Not-ready placeholder.** If today's digest still isn't available, the section shows `Today's digest not ready yet.` rather than omitting it or showing stale content.
+
+Each episode renders its title, summary, and any action items (as checkable tasks).
+
 ## Commands
 
 ### `/task-management:setup`
@@ -73,7 +98,7 @@ Install the Apple Calendar MCP server into your MCP config so the plugin and you
 ### `/task-management:today`
 
 Generate daily task files:
-- `today.md` - Overdue tasks, tasks due today, meetings (from Apple Calendar when enabled), in-progress ideas
+- `today.md` - Overdue tasks, tasks due today, meetings (from Apple Calendar when enabled), podcast digest (from ai-podcast-ripper when enabled), in-progress ideas
 - `this-week.md` - Tasks for remaining days this week
 - `next-week.md` - Tasks for next week
 
