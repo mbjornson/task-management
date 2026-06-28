@@ -51,3 +51,26 @@ def test_load_email_config_string_recipient_coerced_to_list():
         "email_scheduled": True, "emails": "solo@x.com", "email_from": "a@x.com",
     }})
     assert cfg["recipients"] == ["solo@x.com"]
+
+
+def _paths_cfg(tmp_path):
+    return {"paths": {"tasks_root": str(tmp_path)}}
+
+
+def test_should_send_when_no_stamp(tmp_path):
+    assert email_schedule.should_send_today(_paths_cfg(tmp_path), "2026-06-30") is True
+
+
+def test_should_not_send_when_stamped_today(tmp_path):
+    (tmp_path / ".schedule-email-sent").write_text("2026-06-30\n")
+    assert email_schedule.should_send_today(_paths_cfg(tmp_path), "2026-06-30") is False
+
+
+def test_should_send_when_stamp_is_old(tmp_path):
+    (tmp_path / ".schedule-email-sent").write_text("2026-06-29\n")
+    assert email_schedule.should_send_today(_paths_cfg(tmp_path), "2026-06-30") is True
+
+
+def test_mark_sent_writes_stamp(tmp_path):
+    email_schedule.mark_sent_today(_paths_cfg(tmp_path), "2026-06-30")
+    assert (tmp_path / ".schedule-email-sent").read_text().strip() == "2026-06-30"

@@ -55,3 +55,23 @@ def load_email_config(config):
             "port": int(integrations.get("email_fallback_smtp_port", 587)),
         },
     }
+
+
+def _stamp_path(config):
+    return Path(config["paths"]["tasks_root"]) / STAMP_FILENAME
+
+
+def should_send_today(config, today_str):
+    """True if the stamp file does not already record today's date."""
+    try:
+        return _stamp_path(config).read_text().strip() != today_str
+    except (FileNotFoundError, OSError):
+        return True
+
+
+def mark_sent_today(config, today_str):
+    """Record today's date in the stamp file (best-effort)."""
+    try:
+        _stamp_path(config).write_text(today_str + "\n")
+    except OSError:
+        pass
