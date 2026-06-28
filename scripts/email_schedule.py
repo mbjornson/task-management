@@ -91,3 +91,11 @@ def build_message(markdown_text, subject, sender, recipients):
     except Exception:
         pass  # degrade to text-only if markdown is unavailable
     return msg
+
+
+def send_via_smtp(host, port, user, password, message):
+    """Send message via SMTP + STARTTLS. Raises on failure."""
+    with smtplib.SMTP(host, port, timeout=30) as smtp:
+        smtp.starttls()
+        smtp.login(user, password)
+        smtp.send_message(message)

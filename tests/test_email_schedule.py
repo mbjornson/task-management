@@ -92,3 +92,16 @@ def test_build_message_plain_text_is_raw_markdown():
     msg = email_schedule.build_message("# Today", "S", "a@x.com", ["a@x.com"])
     plain = [p for p in msg.walk() if p.get_content_type() == "text/plain"][0]
     assert "# Today" in plain.get_content()
+
+
+def test_send_via_smtp_orders_starttls_login_send():
+    smtp = MagicMock()
+    cm = MagicMock()
+    cm.__enter__.return_value = smtp
+    cm.__exit__.return_value = False
+    with patch("smtplib.SMTP", return_value=cm) as mk:
+        email_schedule.send_via_smtp("h", 587, "u", "p", "MSG")
+    mk.assert_called_once_with("h", 587, timeout=30)
+    smtp.starttls.assert_called_once()
+    smtp.login.assert_called_once_with("u", "p")
+    smtp.send_message.assert_called_once_with("MSG")
