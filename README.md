@@ -108,9 +108,11 @@ integrations:
 SMTP app passwords must be stored in the macOS Keychain (service `task-management-smtp`, account = the sending address):
 
 ```bash
-security add-generic-password -U -s task-management-smtp -a you@example.com   -w '<app-password>'
-security add-generic-password -U -s task-management-smtp -a backup@gmail.com  -w '<app-password>'
+security add-generic-password -U -s task-management-smtp -a you@example.com  -w
+security add-generic-password -U -s task-management-smtp -a backup@gmail.com -w
 ```
+
+Omitting the password value after `-w` causes `security` to prompt interactively, keeping the app password out of shell history.
 
 Behavior:
 

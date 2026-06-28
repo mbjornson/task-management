@@ -172,7 +172,7 @@ def test_maybe_send_skips_when_already_sent(tmp_path):
     (tmp_path / ".schedule-email-sent").write_text("2026-06-30\n")
     (tmp_path / "today.md").write_text("# Today")
     status = email_schedule.maybe_send(_send_cfg(tmp_path), "2026-06-30", tmp_path / "today.md")
-    assert "skipped" in status
+    assert status == "skipped (already sent today)"
 
 
 def test_maybe_send_sends_and_stamps(tmp_path):

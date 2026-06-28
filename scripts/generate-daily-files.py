@@ -516,7 +516,10 @@ def generate_today_md(dates):
         f.write(content)
 
     if email_schedule is not None:
-        status = email_schedule.maybe_send(get_config(), today, BASE_DIR / "today.md")
+        try:
+            status = email_schedule.maybe_send(get_config(), today, BASE_DIR / "today.md")
+        except Exception as e:
+            status = f"skipped ({e})"
         print(f"  - schedule email: {status}")
 
     print(f"  - {len(overdue)} overdue task(s)")
