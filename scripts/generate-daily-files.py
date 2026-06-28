@@ -19,7 +19,7 @@ from pathlib import Path
 
 # Import config and dates from same directory
 from config import (
-    get_tasks_root, get_folder, get_link_format,
+    get_tasks_root, get_folder, get_link_format, get_config,
     is_apple_calendar_enabled, get_apple_calendar_calendars,
     is_podcast_digest_enabled, get_podcast_digest_path,
     get_podcast_digest_refresh_cmd,
@@ -30,6 +30,11 @@ try:
     from calendar_apple import get_today_events
 except ImportError:
     get_today_events = None
+
+try:
+    import email_schedule
+except ImportError:
+    email_schedule = None
 
 # Get directories from config
 BASE_DIR = get_tasks_root()
@@ -509,6 +514,10 @@ def generate_today_md(dates):
     # Write file
     with open(BASE_DIR / "today.md", 'w') as f:
         f.write(content)
+
+    if email_schedule is not None:
+        status = email_schedule.maybe_send(get_config(), today, BASE_DIR / "today.md")
+        print(f"  - schedule email: {status}")
 
     print(f"  - {len(overdue)} overdue task(s)")
     print(f"  - {len(due_today)} task(s) due today")

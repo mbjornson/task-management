@@ -26,3 +26,13 @@ integrations:
   podcast_digest: false    # Set to true to include podcast digest in /today
   # podcast_digest_path: "/path/to/podcast-ripper/transcripts/digests"  # Directory containing yyyy-mm-dd.md digest files
   # podcast_digest_refresh_cmd: "/path/to/python3 /path/to/rip.py --digest"  # Optional: run before reading to materialize today's digest on demand (only today's is used — no stale fallback)
+  email_scheduled: false                # email today.md once per day (config-driven)
+  # emails: ["matt@shapeandship.com"]   # recipient list
+  # email_from: "matt@shapeandship.com"
+  # email_smtp_host: "smtp.office365.com"
+  # email_smtp_port: 587
+  # email_keychain_service: "task-management-smtp"
+  # Fallback (used only if the primary SMTP send fails):
+  # email_fallback_from: "mbjornson@gmail.com"
+  # email_fallback_smtp_host: "smtp.gmail.com"
+  # email_fallback_smtp_port: 587
