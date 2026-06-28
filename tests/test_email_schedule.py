@@ -74,3 +74,21 @@ def test_should_send_when_stamp_is_old(tmp_path):
 def test_mark_sent_writes_stamp(tmp_path):
     email_schedule.mark_sent_today(_paths_cfg(tmp_path), "2026-06-30")
     assert (tmp_path / ".schedule-email-sent").read_text().strip() == "2026-06-30"
+
+
+def test_build_message_headers_and_parts():
+    msg = email_schedule.build_message(
+        "# Today\n\n- a\n- b", "Schedule for Mon Jun 30", "a@x.com", ["a@x.com", "b@y.com"]
+    )
+    assert msg["Subject"] == "Schedule for Mon Jun 30"
+    assert msg["From"] == "a@x.com"
+    assert msg["To"] == "a@x.com, b@y.com"
+    content_types = [part.get_content_type() for part in msg.walk()]
+    assert "text/plain" in content_types
+    assert "text/html" in content_types  # markdown is installed (Step 1)
+
+
+def test_build_message_plain_text_is_raw_markdown():
+    msg = email_schedule.build_message("# Today", "S", "a@x.com", ["a@x.com"])
+    plain = [p for p in msg.walk() if p.get_content_type() == "text/plain"][0]
+    assert "# Today" in plain.get_content()

@@ -75,3 +75,19 @@ def mark_sent_today(config, today_str):
         _stamp_path(config).write_text(today_str + "\n")
     except OSError:
         pass
+
+
+def build_message(markdown_text, subject, sender, recipients):
+    """Build a multipart/alternative email: plain-text markdown + rendered HTML."""
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = sender
+    msg["To"] = ", ".join(recipients)
+    msg.set_content(markdown_text)  # text/plain
+    try:
+        import markdown as _md
+        html = _md.markdown(markdown_text, extensions=["extra", "sane_lists", "nl2br"])
+        msg.add_alternative(f"<html><body>{html}</body></html>", subtype="html")
+    except Exception:
+        pass  # degrade to text-only if markdown is unavailable
+    return msg
