@@ -2,7 +2,10 @@
 name = "task-management"
 version = "0.1.0"
 requires-python = ">=3.10"
-dependencies = ["pyyaml"]
+dependencies = [
+    "pyyaml",
+    "pyobjc-framework-EventKit; sys_platform == 'darwin'",
+]
 
 [project.optional-dependencies]
 dev = ["pytest", "pylint"]

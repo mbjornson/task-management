@@ -1,33 +1,31 @@
-"""Tests for the three bugs fixed in calendar_apple.py.
+"""Tests for calendar_apple.py.
+
+EventKit (PyObjC) is the primary reader on macOS; a hardened AppleScript reader
+is the fallback. The historical bugs this guards against:
 
 Bug 1 – _get_all_calendar_names used 'character id 0' as a delimiter; macOS
-        returns empty output for that, yielding no calendar names and causing
-        the event lookup to fall back to ("Calendar", "Work", "Home"), missing
-        the user's actual Exchange calendar.  Fixed to use "|".
+        returns empty output for that, yielding no calendar names. Fixed to
+        use "|".
 
 Bug 2 – _get_today_events_applescript called subprocess.run(['osascript', '-e',
-        ...]) once per calendar with a 15-second timeout.  Exchange/iCloud
-        calendars take 16+ seconds, so they always timed out.  Fixed to build
-        one AppleScript that iterates all calendars and runs it via
-        ['bash', '-c', 'osascript <tempfile>'] — routing through bash sidesteps
-        the TCC permission block that prevents direct Python-subprocess osascript
-        calls from accessing Exchange event data.
+        ...]) once per calendar with a short timeout. Exchange/iCloud calendars
+        take 16+ seconds, so they always timed out. Fixed to build one
+        AppleScript that iterates all calendars and runs it via
+        ['bash', '-c', 'osascript <tempfile>']. The AppleScript now also wraps
+        each event's property extraction in its own try/on error so one bad
+        event is skipped rather than abandoning the rest of its calendar.
 
-Bug 3 – _call_mcp_get_today_events killed only proc.pid on timeout, leaving npx
-        child processes alive.  Those children held a Calendar.app connection,
-        blocking the AppleScript fallback for the remainder of the run.  Fixed
-        to use os.killpg(os.getpgid(proc.pid), SIGKILL) with start_new_session=True
-        so the entire process tree is killed at once.
+Silent-drop fix – the EventKit reader maps each event inside its own try/except
+        so a single event that throws on a property read can never truncate the
+        remaining events (the root cause of the dropped "Coffee Bob MacNeal").
 """
 
 import os
-import signal
 import subprocess
 import sys
-import threading
-import time
+from datetime import datetime
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -35,7 +33,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 import calendar_apple
 from calendar_apple import (
-    _call_mcp_get_today_events,
     _get_all_calendar_names,
     _get_today_events_all_calendars,
     _get_today_events_applescript,
@@ -129,6 +126,29 @@ class TestGetTodayEventsAppleScriptBashRouting:
             _get_today_events_applescript(["Cal A", "Cal B", "Cal C"])
         assert mock_run.call_count == 1
 
+    def test_applescript_has_per_event_error_handling(self):
+        """The generated AppleScript must guard each event with its own
+        try/on error INSIDE the event loop, so one bad event is skipped rather
+        than aborting the rest of the calendar (the silent-drop fix)."""
+        captured = {}
+
+        def capture(cmd, *a, **k):
+            # Read the temp AppleScript file the function just wrote.
+            path = cmd[2].split("osascript ", 1)[1].strip()
+            captured["script"] = Path(path).read_text(encoding="utf-8")
+            return _run_result()
+
+        with patch("subprocess.run", side_effect=capture), \
+             patch("platform.system", return_value="Darwin"):
+            _get_today_events_applescript(["Work"])
+
+        script = captured["script"]
+        assert "repeat with e in calEvents" in script
+        loop_start = script.index("repeat with e in calEvents")
+        # The per-event guard (try ... on error) must appear inside the loop.
+        assert "on error" in script[loop_start:]
+        assert "try" in script[loop_start:]
+
     def test_parses_tab_separated_events(self):
         stdout = "9:00:00 AM\t9:30:00 AM\tStandup\n11:00:00 AM\t12:00:00 PM\tTeam Meeting\n"
         with patch("subprocess.run", return_value=_run_result(stdout)), \
@@ -151,7 +171,7 @@ class TestGetTodayEventsAppleScriptBashRouting:
 
     def test_normalizes_narrow_no_break_space_in_times(self):
         """AppleScript time strings use U+202F (narrow no-break space); must become plain space."""
-        stdout = "9:00:00 AM\t9:30:00 AM\tStandup\n"
+        stdout = "9:00:00 AM\t9:30:00 AM\tStandup\n"
         with patch("subprocess.run", return_value=_run_result(stdout)), \
              patch("platform.system", return_value="Darwin"):
             events = _get_today_events_applescript(["Work"])
@@ -214,168 +234,199 @@ class TestGetTodayEventsAppleScriptBashRouting:
             assert not os.path.exists(path), f"temp file not cleaned up after timeout: {path}"
 
 
-# ─── Bug 3: _call_mcp_get_today_events – kill entire process group on timeout ─
+# ─── EventKit is the primary source on macOS; AppleScript is the fallback ─────
 
 
-class TestMcpKillsProcessGroupOnTimeout:
-    """The old code called proc.kill() on timeout, leaving npx child processes
-    alive.  Those children held a Calendar.app connection, blocking the
-    AppleScript fallback.  Fixed to os.killpg the whole process group."""
+class TestEventKitIsPrimaryOnDarwin:
+    """On macOS EventKit runs first. It only falls back to AppleScript when
+    EventKit signals unavailability/denial by returning None."""
 
-    def _make_hanging_proc(self, block_event):
-        """Return a mock Popen proc whose readline blocks until block_event is set."""
-        mock_proc = MagicMock()
-        mock_proc.pid = 99999
-        mock_proc.stdout.readline.side_effect = lambda: (block_event.wait(5), "")[1]
-        return mock_proc
-
-    def test_returns_none_on_timeout(self):
-        block = threading.Event()
-        try:
-            with patch("subprocess.Popen", return_value=self._make_hanging_proc(block)), \
-                 patch("os.killpg", side_effect=lambda *a: block.set()), \
-                 patch("os.getpgid", return_value=99999), \
-                 patch.object(calendar_apple, "MCP_TIMEOUT_SECONDS", 0.1):
-                result = _call_mcp_get_today_events()
-            assert result is None
-        finally:
-            block.set()
-
-    def test_calls_killpg_not_just_proc_kill_on_timeout(self):
-        """Must call os.killpg so the whole npx process tree is torn down."""
-        block = threading.Event()
-        try:
-            with patch("subprocess.Popen", return_value=self._make_hanging_proc(block)), \
-                 patch("os.killpg") as mock_killpg, \
-                 patch("os.getpgid", return_value=99999), \
-                 patch.object(calendar_apple, "MCP_TIMEOUT_SECONDS", 0.1):
-                mock_killpg.side_effect = lambda *a: block.set()
-                _call_mcp_get_today_events()
-            mock_killpg.assert_called_once_with(99999, signal.SIGKILL)
-        finally:
-            block.set()
-
-    def test_uses_start_new_session_for_process_group(self):
-        """start_new_session=True is required so the proc gets its own pgid for killpg."""
-        popen_kwargs = {}
-        captured = threading.Event()
-
-        def fake_popen(*args, **kwargs):
-            popen_kwargs.update(kwargs)
-            captured.set()
-            raise FileNotFoundError
-
-        with patch("subprocess.Popen", side_effect=fake_popen):
-            _call_mcp_get_today_events()
-
-        captured.wait(timeout=2)
-        assert popen_kwargs.get("start_new_session") is True
-
-    def test_returns_none_when_npx_not_found(self):
-        with patch("subprocess.Popen", side_effect=FileNotFoundError):
-            result = _call_mcp_get_today_events()
-        assert result is None
-
-    def test_returns_events_on_successful_mcp_response(self):
-        import json as _json
-        events_json = '[{"start":"9:00 AM","end":"9:30 AM","title":"Standup"}]'
-        init_resp = _json.dumps({
-            "jsonrpc": "2.0", "id": 1,
-            "result": {"protocolVersion": "2024-11-05", "capabilities": {}},
-        }) + "\n"
-        call_resp = _json.dumps({
-            "jsonrpc": "2.0", "id": 2,
-            "result": {"content": [{"type": "text", "text": events_json}]},
-        }) + "\n"
-        responses = iter([init_resp, call_resp, ""])
-
-        mock_proc = MagicMock()
-        mock_proc.pid = 12345
-        mock_proc.stdout.readline.side_effect = lambda: next(responses, "")
-
-        with patch("subprocess.Popen", return_value=mock_proc):
-            result = _call_mcp_get_today_events()
-
-        assert result is not None
-        assert len(result) == 1
-        assert result[0]["title"] == "Standup"
-
-    def test_returns_empty_list_when_mcp_returns_no_events(self):
-        init_resp = '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{}}}\n'
-        call_resp = '{"jsonrpc":"2.0","id":2,"result":{"content":[]}}\n'
-        responses = iter([init_resp, call_resp, ""])
-
-        mock_proc = MagicMock()
-        mock_proc.pid = 12345
-        mock_proc.stdout.readline.side_effect = lambda: next(responses, "")
-
-        with patch("subprocess.Popen", return_value=mock_proc):
-            result = _call_mcp_get_today_events()
-
-        assert result == []
-
-
-# ─── AppleScript is the primary source on macOS; MCP is fallback only ────────
-
-
-class TestAppleScriptIsPrimaryOnDarwin:
-    """The MCP server only sees a subset of calendars (e.g. just 'Siri
-    Suggestions') and can return [] even when real meetings exist. AppleScript
-    queries all calendars and returns times correctly, so on macOS it must run
-    first; MCP is only a fallback (non-macOS, or when AppleScript finds nothing)."""
-
-    def test_applescript_runs_first_and_mcp_not_called_when_events_found(self):
+    def test_eventkit_runs_first_and_applescript_not_called_when_events_found(self):
         events = [{"start": "11:00:00 AM", "end": "12:00:00 PM", "title": "Catalyst Check-in"}]
         with patch("platform.system", return_value="Darwin"), \
-             patch.object(calendar_apple, "_get_today_events_all_calendars", return_value=events) as mock_as, \
-             patch.object(calendar_apple, "_call_mcp_get_today_events") as mock_mcp:
+             patch.object(calendar_apple, "_get_today_events_eventkit", return_value=events) as mock_ek, \
+             patch.object(calendar_apple, "_get_today_events_all_calendars") as mock_all, \
+             patch.object(calendar_apple, "_get_today_events_applescript") as mock_named:
             result = calendar_apple.get_today_events(None)
         assert result == events
-        mock_as.assert_called_once()
-        mock_mcp.assert_not_called()
+        mock_ek.assert_called_once()
+        mock_all.assert_not_called()
+        mock_named.assert_not_called()
 
-    def test_falls_back_to_mcp_when_applescript_returns_empty(self):
-        mcp_events = [{"start": "9:00:00 AM", "end": "9:30:00 AM", "title": "Standup"}]
+    def test_falls_back_to_applescript_when_eventkit_returns_none(self):
+        as_events = [{"start": "9:00:00 AM", "end": "9:30:00 AM", "title": "Standup"}]
         with patch("platform.system", return_value="Darwin"), \
-             patch.object(calendar_apple, "_get_today_events_all_calendars", return_value=[]), \
-             patch.object(calendar_apple, "_call_mcp_get_today_events", return_value=mcp_events) as mock_mcp:
+             patch.object(calendar_apple, "_get_today_events_eventkit", return_value=None), \
+             patch.object(calendar_apple, "_get_today_events_all_calendars", return_value=as_events) as mock_all:
             result = calendar_apple.get_today_events(None)
-        assert result == mcp_events
-        mock_mcp.assert_called_once()
+        assert result == as_events
+        mock_all.assert_called_once()
 
-    def test_uses_configured_calendars_for_applescript_first(self):
-        events = [{"start": "2:00:00 PM", "end": "3:00:00 PM", "title": "Client call"}]
+    def test_falls_back_to_named_applescript_when_eventkit_returns_none(self):
+        as_events = [{"start": "2:00:00 PM", "end": "3:00:00 PM", "title": "Client call"}]
         with patch("platform.system", return_value="Darwin"), \
-             patch.object(calendar_apple, "_get_today_events_applescript", return_value=events) as mock_as, \
-             patch.object(calendar_apple, "_call_mcp_get_today_events") as mock_mcp:
+             patch.object(calendar_apple, "_get_today_events_eventkit", return_value=None), \
+             patch.object(calendar_apple, "_get_today_events_applescript", return_value=as_events) as mock_named:
             result = calendar_apple.get_today_events(["Work"])
-        assert result == events
-        mock_as.assert_called_once_with(["Work"])
-        mock_mcp.assert_not_called()
+        assert result == as_events
+        mock_named.assert_called_once_with(["Work"])
 
-    def test_non_darwin_uses_mcp(self):
-        mcp_events = [{"start": "9:00:00 AM", "end": "9:30:00 AM", "title": "Standup"}]
+    def test_non_darwin_returns_empty(self):
         with patch("platform.system", return_value="Linux"), \
-             patch.object(calendar_apple, "_call_mcp_get_today_events", return_value=mcp_events) as mock_mcp:
+             patch.object(calendar_apple, "_get_today_events_eventkit") as mock_ek:
             result = calendar_apple.get_today_events(None)
-        assert result == mcp_events
-        mock_mcp.assert_called_once()
+        assert result == []
+        mock_ek.assert_not_called()
 
 
-class TestMcpParsesRealServerKeys:
-    """The foxychat apple-calendar server emits keys startDate/endDate/summary
-    with full datetime strings, e.g. 'Wednesday, June 17, 2026 at 11:00:00 AM'.
-    The parser must extract the time-of-day so meetings show with times."""
+# ─── EventKit reader unit tests (the silent-drop fix) ────────────────────────
 
-    def test_parses_startdate_enddate_summary(self):
-        text = (
-            '[{"summary":"Catalyst Check-in",'
-            '"startDate":"Wednesday, June 17, 2026 at 11:00:00 AM",'
-            '"endDate":"Wednesday, June 17, 2026 at 12:00:00 PM",'
-            '"allDay":false}]'
-        )
-        events = calendar_apple._parse_mcp_events_text(text)
-        assert len(events) == 1
-        assert events[0]["title"] == "Catalyst Check-in"
-        assert events[0]["start"] == "11:00:00 AM"
-        assert events[0]["end"] == "12:00:00 PM"
+
+def _fake_event(title, start_dt, end_dt):
+    """Build a fake EKEvent mock with title()/startDate()/endDate()."""
+    e = MagicMock()
+    e.title.return_value = title
+    e.startDate.return_value.timeIntervalSince1970.return_value = start_dt.timestamp()
+    e.endDate.return_value.timeIntervalSince1970.return_value = end_dt.timestamp()
+    return e
+
+
+def _fake_store(events, granted=True):
+    """Build a fake EKEventStore instance whose access completion is synchronous."""
+    store = MagicMock()
+
+    def request_access(entity_type, completion):
+        completion(granted, None)
+
+    store.requestAccessToEntityType_completion_.side_effect = request_access
+    store.calendars.return_value = []
+    store.predicateForEventsWithStartDate_endDate_calendars_.return_value = "PREDICATE"
+    store.eventsMatchingPredicate_.return_value = events
+    return store
+
+
+def _patch_ekstore(store):
+    """Patch calendar_apple.EKEventStore so .alloc().init() returns store."""
+    fake_cls = MagicMock()
+    fake_cls.alloc.return_value.init.return_value = store
+    return patch.object(calendar_apple, "EKEventStore", fake_cls)
+
+
+class TestEventKitReader:
+    def test_maps_events_to_dict_contract_with_formatted_times(self):
+        events = [
+            _fake_event("Standup", datetime(2026, 6, 29, 9, 0, 0), datetime(2026, 6, 29, 9, 30, 0)),
+            _fake_event("Lunch", datetime(2026, 6, 29, 12, 0, 0), datetime(2026, 6, 29, 13, 0, 0)),
+        ]
+        store = _fake_store(events)
+        with patch("platform.system", return_value="Darwin"), _patch_ekstore(store):
+            result = calendar_apple._eventkit_events_between(
+                datetime(2026, 6, 29), datetime(2026, 6, 30)
+            )
+        assert result == [
+            {"start": "9:00:00 AM", "end": "9:30:00 AM", "title": "Standup"},
+            {"start": "12:00:00 PM", "end": "1:00:00 PM", "title": "Lunch"},
+        ]
+
+    def test_bad_event_is_skipped_others_returned(self):
+        """A single event that raises on property access must NOT drop the rest
+        (the anti-truncation fix)."""
+        good1 = _fake_event("Before", datetime(2026, 6, 29, 8, 0, 0), datetime(2026, 6, 29, 8, 30, 0))
+        bad = MagicMock()
+        bad.startDate.side_effect = RuntimeError("boom on property read")
+        good2 = _fake_event("After", datetime(2026, 6, 29, 10, 0, 0), datetime(2026, 6, 29, 10, 30, 0))
+        store = _fake_store([good1, bad, good2])
+        with patch("platform.system", return_value="Darwin"), _patch_ekstore(store):
+            result = calendar_apple._eventkit_events_between(
+                datetime(2026, 6, 29), datetime(2026, 6, 30)
+            )
+        titles = [e["title"] for e in result]
+        assert titles == ["Before", "After"]
+
+    def test_dedups_identical_events(self):
+        e1 = _fake_event("Standup", datetime(2026, 6, 29, 9, 0, 0), datetime(2026, 6, 29, 9, 30, 0))
+        e2 = _fake_event("Standup", datetime(2026, 6, 29, 9, 0, 0), datetime(2026, 6, 29, 9, 30, 0))
+        store = _fake_store([e1, e2])
+        with patch("platform.system", return_value="Darwin"), _patch_ekstore(store):
+            result = calendar_apple._eventkit_events_between(
+                datetime(2026, 6, 29), datetime(2026, 6, 30)
+            )
+        assert len(result) == 1
+
+    def test_no_title_falls_back_to_placeholder(self):
+        e = _fake_event(None, datetime(2026, 6, 29, 9, 0, 0), datetime(2026, 6, 29, 9, 30, 0))
+        store = _fake_store([e])
+        with patch("platform.system", return_value="Darwin"), _patch_ekstore(store):
+            result = calendar_apple._eventkit_events_between(
+                datetime(2026, 6, 29), datetime(2026, 6, 30)
+            )
+        assert result[0]["title"] == "(No title)"
+
+    def test_access_denied_returns_none(self):
+        store = _fake_store([], granted=False)
+        with patch("platform.system", return_value="Darwin"), _patch_ekstore(store):
+            result = calendar_apple._eventkit_events_between(
+                datetime(2026, 6, 29), datetime(2026, 6, 30)
+            )
+        assert result is None
+
+    def test_eventkit_unavailable_returns_none(self):
+        with patch("platform.system", return_value="Darwin"), \
+             patch.object(calendar_apple, "EKEventStore", None):
+            result = calendar_apple._eventkit_events_between(
+                datetime(2026, 6, 29), datetime(2026, 6, 30)
+            )
+        assert result is None
+
+    def test_non_darwin_returns_none(self):
+        store = _fake_store([])
+        with patch("platform.system", return_value="Linux"), _patch_ekstore(store):
+            result = calendar_apple._eventkit_events_between(
+                datetime(2026, 6, 29), datetime(2026, 6, 30)
+            )
+        assert result is None
+
+    def test_calendar_filter_falls_back_to_all_when_no_name_matches(self):
+        """If a requested calendar name matches none, we pass None (all calendars)
+        to the predicate so we never silently miss everything."""
+        cal = MagicMock()
+        cal.title.return_value = "Work"
+        e = _fake_event("Meeting", datetime(2026, 6, 29, 9, 0, 0), datetime(2026, 6, 29, 9, 30, 0))
+        store = _fake_store([e])
+        store.calendars.return_value = [cal]
+        with patch("platform.system", return_value="Darwin"), _patch_ekstore(store):
+            calendar_apple._eventkit_events_between(
+                datetime(2026, 6, 29), datetime(2026, 6, 30),
+                calendar_names=["Nonexistent"],
+            )
+        # cals arg (3rd positional) must be None when nothing matched.
+        _, _, cals = store.predicateForEventsWithStartDate_endDate_calendars_.call_args[0]
+        assert cals is None
+
+    def test_calendar_filter_passes_matching_calendars(self):
+        work = MagicMock()
+        work.title.return_value = "Work"
+        home = MagicMock()
+        home.title.return_value = "Home"
+        e = _fake_event("Meeting", datetime(2026, 6, 29, 9, 0, 0), datetime(2026, 6, 29, 9, 30, 0))
+        store = _fake_store([e])
+        store.calendars.return_value = [work, home]
+        with patch("platform.system", return_value="Darwin"), _patch_ekstore(store):
+            calendar_apple._eventkit_events_between(
+                datetime(2026, 6, 29), datetime(2026, 6, 30),
+                calendar_names=["Work"],
+            )
+        _, _, cals = store.predicateForEventsWithStartDate_endDate_calendars_.call_args[0]
+        assert cals == [work]
+
+    def test_today_eventkit_delegates_to_between(self):
+        sentinel = [{"start": "9:00:00 AM", "end": "9:30:00 AM", "title": "Standup"}]
+        with patch.object(calendar_apple, "_eventkit_events_between", return_value=sentinel) as mock_between:
+            result = calendar_apple._get_today_events_eventkit(["Work"])
+        assert result == sentinel
+        # Called with a midnight start, +1 day end, and the calendar names.
+        args, _ = mock_between.call_args
+        start, end, names = args
+        assert (start.hour, start.minute, start.second, start.microsecond) == (0, 0, 0, 0)
+        assert (end - start).days == 1
+        assert names == ["Work"]
