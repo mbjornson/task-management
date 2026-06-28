@@ -154,3 +154,39 @@ def test_no_recipients_returns_false():
         ok = email_schedule.send_schedule_email("# x", "2026-06-30", cfg)
     assert ok is False
     send.assert_not_called()
+
+
+def _send_cfg(tmp_path):
+    return {
+        "paths": {"tasks_root": str(tmp_path)},
+        "integrations": {"email_scheduled": True, "emails": ["a@x.com"], "email_from": "a@x.com"},
+    }
+
+
+def test_maybe_send_disabled(tmp_path):
+    cfg = {"paths": {"tasks_root": str(tmp_path)}, "integrations": {"email_scheduled": False}}
+    assert email_schedule.maybe_send(cfg, "2026-06-30", tmp_path / "today.md") == "disabled"
+
+
+def test_maybe_send_skips_when_already_sent(tmp_path):
+    (tmp_path / ".schedule-email-sent").write_text("2026-06-30\n")
+    (tmp_path / "today.md").write_text("# Today")
+    status = email_schedule.maybe_send(_send_cfg(tmp_path), "2026-06-30", tmp_path / "today.md")
+    assert "skipped" in status
+
+
+def test_maybe_send_sends_and_stamps(tmp_path):
+    (tmp_path / "today.md").write_text("# Today\n\n- meeting")
+    with patch.object(email_schedule, "send_schedule_email", return_value=True) as send:
+        status = email_schedule.maybe_send(_send_cfg(tmp_path), "2026-06-30", tmp_path / "today.md")
+    assert status == "sent"
+    send.assert_called_once()
+    assert (tmp_path / ".schedule-email-sent").read_text().strip() == "2026-06-30"
+
+
+def test_maybe_send_failure_does_not_stamp(tmp_path):
+    (tmp_path / "today.md").write_text("# Today")
+    with patch.object(email_schedule, "send_schedule_email", return_value=False):
+        status = email_schedule.maybe_send(_send_cfg(tmp_path), "2026-06-30", tmp_path / "today.md")
+    assert "failed" in status
+    assert not (tmp_path / ".schedule-email-sent").exists()

@@ -136,3 +136,20 @@ def send_schedule_email(markdown_text, today_str, cfg):
 
     print("email_schedule: all send attempts failed", file=sys.stderr)
     return False
+
+
+def maybe_send(config, today_str, today_md_path):
+    """Gate on config + once-per-day stamp, send, stamp on success. Returns a status string."""
+    try:
+        cfg = load_email_config(config)
+        if cfg is None:
+            return "disabled"
+        if not should_send_today(config, today_str):
+            return "skipped (already sent today)"
+        text = Path(today_md_path).read_text()
+        if send_schedule_email(text, today_str, cfg):
+            mark_sent_today(config, today_str)
+            return "sent"
+        return "failed (see log)"
+    except Exception as e:  # never break generation
+        return f"skipped ({e})"
