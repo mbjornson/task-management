@@ -99,3 +99,40 @@ def send_via_smtp(host, port, user, password, message):
         smtp.starttls()
         smtp.login(user, password)
         smtp.send_message(message)
+
+
+def send_schedule_email(markdown_text, today_str, cfg):
+    """Send via primary (O365), falling back to Gmail. Returns True on success; never raises."""
+    try:
+        date_label = datetime.strptime(today_str, "%Y-%m-%d").strftime("%a %b %-d")
+    except ValueError:
+        date_label = today_str
+    subject = f"Schedule for {date_label}"
+
+    recipients = cfg.get("recipients") or []
+    if not recipients:
+        print("email_schedule: no recipients configured; skipping", file=sys.stderr)
+        return False
+
+    for which in ("primary", "fallback"):
+        leg = cfg.get(which) or {}
+        sender = leg.get("from")
+        host = leg.get("host")
+        port = leg.get("port")
+        if not sender or not host:
+            continue
+        password = get_keychain_password(cfg["service"], sender)
+        if not password:
+            print(f"email_schedule: no keychain password for {sender} ({which})", file=sys.stderr)
+            continue
+        message = build_message(markdown_text, subject, sender, recipients)
+        try:
+            send_via_smtp(host, port, sender, password, message)
+            print(f"email_schedule: sent via {which} ({sender})", file=sys.stderr)
+            return True
+        except (smtplib.SMTPException, OSError) as e:
+            print(f"email_schedule: {which} send failed ({sender}): {e}", file=sys.stderr)
+            continue
+
+    print("email_schedule: all send attempts failed", file=sys.stderr)
+    return False

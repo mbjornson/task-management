@@ -105,3 +105,52 @@ def test_send_via_smtp_orders_starttls_login_send():
     smtp.starttls.assert_called_once()
     smtp.login.assert_called_once_with("u", "p")
     smtp.send_message.assert_called_once_with("MSG")
+
+
+def _full_cfg():
+    return {
+        "recipients": ["to@x.com"],
+        "service": "svc",
+        "primary": {"from": "o@365.com", "host": "smtp.office365.com", "port": 587},
+        "fallback": {"from": "g@gmail.com", "host": "smtp.gmail.com", "port": 587},
+    }
+
+
+def test_primary_success_returns_true():
+    with patch.object(email_schedule, "get_keychain_password", return_value="pw"), \
+         patch.object(email_schedule, "send_via_smtp") as send:
+        ok = email_schedule.send_schedule_email("# x", "2026-06-30", _full_cfg())
+    assert ok is True
+    assert send.call_count == 1
+    assert send.call_args[0][0] == "smtp.office365.com"
+
+
+def test_primary_fails_falls_back_to_gmail():
+    hosts = []
+
+    def fake_send(host, *a, **k):
+        hosts.append(host)
+        if host == "smtp.office365.com":
+            raise email_schedule.smtplib.SMTPAuthenticationError(535, b"blocked")
+
+    with patch.object(email_schedule, "get_keychain_password", return_value="pw"), \
+         patch.object(email_schedule, "send_via_smtp", side_effect=fake_send):
+        ok = email_schedule.send_schedule_email("# x", "2026-06-30", _full_cfg())
+    assert ok is True
+    assert hosts == ["smtp.office365.com", "smtp.gmail.com"]
+
+
+def test_both_fail_returns_false():
+    with patch.object(email_schedule, "get_keychain_password", return_value="pw"), \
+         patch.object(email_schedule, "send_via_smtp", side_effect=OSError("no network")):
+        ok = email_schedule.send_schedule_email("# x", "2026-06-30", _full_cfg())
+    assert ok is False
+
+
+def test_no_recipients_returns_false():
+    cfg = _full_cfg()
+    cfg["recipients"] = []
+    with patch.object(email_schedule, "send_via_smtp") as send:
+        ok = email_schedule.send_schedule_email("# x", "2026-06-30", cfg)
+    assert ok is False
+    send.assert_not_called()
