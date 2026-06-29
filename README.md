@@ -85,6 +85,42 @@ Behavior:
 
 Each episode renders its title, summary, and any action items (as checkable tasks).
 
+### Schedule Email Integration
+
+When `integrations.email_scheduled` is `true`, the generator emails the full contents of `today.md` to the configured recipients. macOS-only.
+
+Configure in `~/.claude/task-management-config/config.yaml`:
+
+```yaml
+integrations:
+  email_scheduled: true
+  emails: ["you@example.com"]              # recipient list
+  email_from: "you@example.com"            # sending address (primary)
+  # email_smtp_host: "smtp.office365.com"  # default
+  # email_smtp_port: 587                   # default
+  # email_keychain_service: "task-management-smtp"  # default
+  # Fallback — used only if the primary send fails:
+  # email_fallback_from: "backup@gmail.com"
+  # email_fallback_smtp_host: "smtp.gmail.com"
+  # email_fallback_smtp_port: 587
+```
+
+SMTP app passwords must be stored in the macOS Keychain (service `task-management-smtp`, account = the sending address):
+
+```bash
+security add-generic-password -U -s task-management-smtp -a you@example.com  -w
+security add-generic-password -U -s task-management-smtp -a backup@gmail.com -w
+```
+
+Omitting the password value after `-w` causes `security` to prompt interactively, keeping the app password out of shell history.
+
+Behavior:
+
+- **Once per day.** A `.schedule-email-sent` stamp in the tasks root records the date of the last successful send. The first generation of the day sends (normally the 6am launchd run); later runs that day are no-ops. A failed send does not write the stamp, so the next run retries.
+- **O365 → Gmail fallback.** Primary is `smtp.office365.com:587` (STARTTLS); if that fails and `email_fallback_from` is configured with a Keychain password, the generator retries via `smtp.gmail.com:587`. Both legs send to the same recipient list.
+- **Best-effort.** Email failures are logged but never abort `today.md` generation. The email subject is `Schedule for <Day Mon D>` (e.g. `Schedule for Sun Jun 28`).
+- **First-run Keychain prompt.** The launchd job reads the login keychain (unlocked while logged in). Run the generator once interactively first to grant "Always Allow" if prompted.
+
 ## Commands
 
 ### `/task-management:setup`

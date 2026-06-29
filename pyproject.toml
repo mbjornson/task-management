@@ -5,6 +5,7 @@ requires-python = ">=3.10"
 dependencies = [
     "pyyaml",
     "pyobjc-framework-EventKit; sys_platform == 'darwin'",
+    "markdown",
 ]
 
 [project.optional-dependencies]
