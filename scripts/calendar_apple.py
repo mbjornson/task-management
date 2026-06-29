@@ -2,215 +2,126 @@
 """
 Apple Calendar integration for task-management plugin.
 
-Uses the Apple Calendar MCP server (npx @foxychat-mcp/apple-calendar) when
-available so the same server powers both the script and any MCP client. If the
-MCP server is not installed or fails, falls back to AppleScript on macOS.
+On macOS, today's events are read primarily via EventKit (PyObjC) — the same
+native API the robust mcp-ical server uses. EventKit sees every calendar and
+maps each event independently, so a single malformed event can never truncate
+the rest of a calendar's events (the silent-drop bug the old AppleScript loop
+had).
+
+If EventKit is unavailable (PyObjC not installed, Calendar permission denied,
+or a store-level error), it falls back to a hardened AppleScript reader. The
+AppleScript wraps each event's property extraction in its own
+``try ... on error ... end try`` so one bad event is skipped instead of
+abandoning the remainder of its calendar.
+
+Non-macOS returns [].
 """
 
-import json
 import os
 import platform
-import re
-import signal
 import subprocess
-import sys
 import tempfile
-import threading
-from datetime import datetime
+from datetime import datetime, timedelta
+from threading import Semaphore
 
-MCP_TIMEOUT_SECONDS = 8
+# Guarded so non-macOS (and tests) can import this module without PyObjC, and
+# so tests can patch calendar_apple.EKEventStore with a fake store.
+try:
+    from EventKit import EKEventStore
+except Exception:  # pragma: no cover - import guard
+    EKEventStore = None
 
-# MCP server command (same as install-apple-calendar-mcp)
-MCP_COMMAND = ["npx", "-y", "@foxychat-mcp/apple-calendar"]
 
+def _fmt_time(dt):
+    """Format a datetime as a 12-hour clock string with no leading zero hour.
 
-def _call_mcp_get_today_events():
+    Matches the contract the consumer relies on, e.g. "9:30:00 AM",
+    "11:00:00 AM", and midnight as "12:00:00 AM" (used to infer all-day events).
     """
-    Call the Apple Calendar MCP server's get_today_events tool via JSON-RPC over stdio.
-    Returns list of dicts with start, end, title; or None on any failure.
+    h = dt.hour % 12 or 12
+    ampm = "AM" if dt.hour < 12 else "PM"
+    return f"{h}:{dt.minute:02d}:{dt.second:02d} {ampm}"
+
+
+def _eventkit_events_between(start_dt, end_dt, calendar_names=None):
+    """Read events in the half-open range [start_dt, end_dt) via EventKit.
+
+    Returns a list of {"start", "end", "title"} dicts (deduped), or None to
+    signal the caller to fall back (non-macOS, no PyObjC, access denied, or any
+    store-level exception).
+
+    start_dt/end_dt are python datetime objects passed directly to EventKit;
+    PyObjC bridges datetime -> NSDate.
     """
-    result_holder = [None]  # mutable so inner thread can set it
-    proc_holder = [None]    # expose proc so outer scope can kill it on timeout
+    if platform.system() != "Darwin" or EKEventStore is None:
+        return None
 
-    def run_mcp():
-        try:
-            proc = subprocess.Popen(
-                MCP_COMMAND,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                start_new_session=True,  # new process group so we can kill the whole tree
-            )
-        except FileNotFoundError:
-            return
-
-        proc_holder[0] = proc
-
-        def send(msg):
-            proc.stdin.write(json.dumps(msg) + "\n")
-            proc.stdin.flush()
-
-        def read_line():
-            line = proc.stdout.readline()
-            if not line:
-                return None
-            return line.strip()
-
-        try:
-            send({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": {"name": "task-management", "version": "1.0.0"},
-                },
-            })
-            init_resp = read_line()
-            if not init_resp:
-                return
-            init = json.loads(init_resp)
-            if "error" in init:
-                return
-            send({"jsonrpc": "2.0", "method": "notifications/initialized"})
-
-            send({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/call",
-                "params": {"name": "get_today_events", "arguments": {}},
-            })
-            call_resp = read_line()
-            if not call_resp:
-                return
-            call = json.loads(call_resp)
-            if "error" in call:
-                return
-            result = call.get("result", {})
-            content = result.get("content", [])
-            if not content:
-                result_holder[0] = []
-                return
-            text = ""
-            for item in content:
-                if isinstance(item, dict) and item.get("type") == "text":
-                    text += item.get("text", "")
-            if not text.strip():
-                result_holder[0] = []
-                return
-            result_holder[0] = _parse_mcp_events_text(text)
-        except (json.JSONDecodeError, OSError, KeyError):
-            pass
-        finally:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (OSError, ProcessLookupError):
-                try:
-                    proc.kill()
-                except OSError:
-                    pass
-            try:
-                proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                pass
-
-    t = threading.Thread(target=run_mcp, daemon=True)
-    t.start()
-    t.join(timeout=MCP_TIMEOUT_SECONDS)
-    if t.is_alive():
-        # Thread is stuck (npx is hanging). Kill the entire process group so npx
-        # and all its children release Calendar.app before we fall back to AppleScript.
-        proc = proc_holder[0]
-        if proc:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (OSError, ProcessLookupError):
-                try:
-                    proc.kill()
-                except OSError:
-                    pass
-            try:
-                proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                pass
-        return None  # timeout → fall back to AppleScript
-    return result_holder[0]
-
-
-def _extract_time(value):
-    """Pull a 'H:MM[:SS] AM/PM' time-of-day out of an MCP date/time string.
-
-    The foxychat server emits full datetimes like
-    "Wednesday, June 17, 2026 at 11:00:00 AM"; take the part after ' at ' and
-    match the clock time. Plain time strings ("9:00 AM") pass through unchanged.
-    """
-    if not value:
-        return ""
-    value = str(value)
-    if " at " in value:
-        value = value.rsplit(" at ", 1)[1]
-    m = re.search(r"\d{1,2}:\d{2}(?::\d{2})?\s*[AP]M", value)
-    return m.group(0).strip() if m else value.strip()
-
-
-def _parse_mcp_events_text(text):
-    """
-    Parse MCP tool output into list of {start, end, title}.
-    Handles JSON array or line-based formats (e.g. "10:00 AM - 11:00 AM Title").
-    """
-    text = text.strip()
-    # Try JSON array first
     try:
-        data = json.loads(text)
-        if isinstance(data, list):
-            out = []
-            for item in data:
-                if isinstance(item, dict):
-                    # Server key drift: real foxychat output uses
-                    # startDate/endDate/summary, not start/end/title.
-                    start = item.get("start", item.get("startTime", item.get("startDate", "")))
-                    end = item.get("end", item.get("endTime", item.get("endDate", "")))
-                    out.append({
-                        "start": _extract_time(start),
-                        "end": _extract_time(end),
-                        "title": str(item.get("title", item.get("summary", "(No title)"))),
-                    })
-                elif isinstance(item, str):
-                    out.append({"start": "", "end": "", "title": item})
-            return out
-        if isinstance(data, dict) and "events" in data:
-            return _parse_mcp_events_text(json.dumps(data["events"]))
-    except json.JSONDecodeError:
-        pass
+        store = EKEventStore.alloc().init()
 
-    # Line-based: "start - end title" or "start–end title" or "title (start - end)"
-    out = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
+        # Blocking access request. 0 == EKEntityTypeEvent.
+        semaphore = Semaphore(0)
+        granted_holder = {"granted": False}
+
+        def completion(granted, error):
+            granted_holder["granted"] = bool(granted)
+            semaphore.release()
+
+        store.requestAccessToEntityType_completion_(0, completion)
+        semaphore.acquire()
+        if not granted_holder["granted"]:
+            return None
+
+        # Resolve calendars. If specific names are requested, filter to the
+        # matching EKCalendar objects; if NONE match, fall back to all calendars
+        # (None) so we never silently miss events.
+        cals = None
+        if calendar_names:
+            wanted = set(calendar_names)
+            matched = [c for c in store.calendars() if c.title() in wanted]
+            cals = matched or None
+
+        predicate = store.predicateForEventsWithStartDate_endDate_calendars_(
+            start_dt, end_dt, cals
+        )
+        ek_events = store.eventsMatchingPredicate_(predicate)
+    except Exception:
+        return None
+
+    events = []
+    for e in ek_events or []:
+        try:
+            start = datetime.fromtimestamp(e.startDate().timeIntervalSince1970())
+            end = datetime.fromtimestamp(e.endDate().timeIntervalSince1970())
+            title = e.title() or "(No title)"
+            events.append({
+                "start": _fmt_time(start),
+                "end": _fmt_time(end),
+                "title": str(title),
+            })
+        except Exception:
+            # THE FIX: one bad event must NOT drop the rest. Skip and continue.
             continue
-        # Match "10:00 AM - 11:00 AM Title" or "10:00 AM–11:00 AM Title"
-        m = re.match(r"^(.+?)\s*[-–]\s*(.+?)\s+(.+)$", line)
-        if m:
-            start, end, title = m.group(1).strip(), m.group(2).strip(), m.group(3).strip()
-            out.append({"start": start, "end": end, "title": title})
-            continue
-        # Match "Title (10:00 AM - 11:00 AM)" or "Title (All day)"
-        m = re.match(r"^(.+?)\s*\((.+)\)\s*$", line)
-        if m:
-            title, rest = m.group(1).strip(), m.group(2).strip()
-            if rest.lower() == "all day":
-                out.append({"start": "12:00:00 AM", "end": "12:00:00 AM", "title": title})
-            else:
-                parts = re.split(r"\s*[-–]\s*", rest, 1)
-                start = parts[0].strip() if parts else ""
-                end = parts[1].strip() if len(parts) > 1 else ""
-                out.append({"start": start, "end": end, "title": title})
-            continue
-        out.append({"start": "", "end": "", "title": line})
-    return out
+
+    seen = set()
+    unique = []
+    for e in events:
+        key = (e["start"], e["end"], e["title"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(e)
+    return unique
+
+
+def _get_today_events_eventkit(calendar_names=None):
+    """Today's events via EventKit, or None to signal fallback.
+
+    Computes today's local bounds and delegates to _eventkit_events_between so
+    the date-bounded core can be verified against an arbitrary date.
+    """
+    start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    return _eventkit_events_between(start, end, calendar_names)
 
 
 def _get_all_calendar_names():
@@ -242,7 +153,12 @@ end tell
 
 
 def _get_today_events_applescript(calendar_names):
-    """Fetch today's events via AppleScript. calendar_names is a sequence of calendar names."""
+    """Fetch today's events via AppleScript. calendar_names is a sequence of calendar names.
+
+    Defense-in-depth fallback for environments without PyObjC. Each event's
+    property extraction is wrapped in its own try/on error so a single bad event
+    is skipped instead of abandoning the rest of its calendar.
+    """
     if platform.system() != "Darwin" or not calendar_names:
         return []
 
@@ -251,7 +167,7 @@ def _get_today_events_applescript(calendar_names):
 
     cal_list = "{" + ", ".join(f'"{_esc(n)}"' for n in calendar_names) + "}"
 
-    # Single AppleScript call queries all calendars \u2014 avoids per-calendar subprocess overhead
+    # Single AppleScript call queries all calendars — avoids per-calendar subprocess overhead
     # and the per-calendar timeout that breaks slow Exchange/iCloud calendars.
     script = f"""
 set todayStart to (current date)
@@ -269,11 +185,15 @@ tell application "Calendar"
             set cal to calendar calName
             set calEvents to (every event of cal whose start date >= todayStart and start date < todayEnd)
             repeat with e in calEvents
-                set startStr to time string of (get start date of e)
-                set endStr to time string of (get end date of e)
-                set sum to summary of e
-                if sum is missing value then set sum to "(No title)"
-                set output to output & startStr & tab & endStr & tab & sum & newline
+                try
+                    set startStr to time string of (get start date of e)
+                    set endStr to time string of (get end date of e)
+                    set sum to summary of e
+                    if sum is missing value then set sum to "(No title)"
+                    set output to output & startStr & tab & endStr & tab & sum & newline
+                on error
+                    -- skip just this event and keep reading the rest of the calendar
+                end try
             end repeat
         end try
     end repeat
@@ -282,7 +202,7 @@ return output
 """
 
     def norm(s):
-        return (s or "").strip().replace("\u202f", " ")
+        return (s or "").strip().replace(" ", " ")
 
     # Write to temp file and run via bash — direct osascript subprocess blocks silently
     # on Exchange/iCloud calendars due to macOS TCC permission scoping.
@@ -329,7 +249,12 @@ return output
 
 
 def _get_today_events_all_calendars():
-    """Fetch today's events from ALL calendars in one AppleScript call via bash."""
+    """Fetch today's events from ALL calendars in one AppleScript call via bash.
+
+    Defense-in-depth fallback for environments without PyObjC. Each event's
+    property extraction is wrapped in its own try/on error so a single bad event
+    is skipped instead of abandoning the rest of its calendar.
+    """
     if platform.system() != "Darwin":
         return []
 
@@ -347,11 +272,15 @@ tell application "Calendar"
         try
             set calEvents to (every event of cal whose start date >= todayStart and start date < todayEnd)
             repeat with e in calEvents
-                set startStr to time string of (get start date of e)
-                set endStr to time string of (get end date of e)
-                set sum to summary of e
-                if sum is missing value then set sum to "(No title)"
-                set output to output & startStr & tab & endStr & tab & sum & newline
+                try
+                    set startStr to time string of (get start date of e)
+                    set endStr to time string of (get end date of e)
+                    set sum to summary of e
+                    if sum is missing value then set sum to "(No title)"
+                    set output to output & startStr & tab & endStr & tab & sum & newline
+                on error
+                    -- skip just this event and keep reading the rest of the calendar
+                end try
             end repeat
         end try
     end repeat
@@ -426,35 +355,26 @@ def get_today_events(calendar_names=None):
     """
     Return today's events from Apple Calendar as a list of dicts with start, end, title.
 
-    On macOS, AppleScript is authoritative: it queries every calendar and returns
-    correct start/end times. The MCP server (npx @foxychat-mcp/apple-calendar) only
-    sees a subset of calendars (e.g. just "Siri Suggestions") and can return [] even
-    when real meetings exist, so it is a fallback — used when AppleScript finds nothing
-    or when not on macOS.
+    On macOS, EventKit (PyObjC) is authoritative: it sees every calendar and
+    maps each event independently, so one malformed event can't truncate the
+    rest. If EventKit is unavailable or permission is denied, a hardened
+    AppleScript reader is used as a fallback.
 
-    calendar_names: specific calendars for the AppleScript query. If None/empty, all
-                    calendars are queried.
+    calendar_names: specific calendars to query. If None/empty, all calendars
+                    are queried.
     """
-    if platform.system() == "Darwin":
+    if platform.system() != "Darwin":
+        return []
+
+    events = _get_today_events_eventkit(calendar_names)
+    if events is None:
+        # EventKit unavailable/denied — fall back to hardened AppleScript.
         if calendar_names:
             events = _get_today_events_applescript(calendar_names)
         else:
-            # No specific list configured — query all calendars in one AppleScript call,
-            # bypassing _get_all_calendar_names() which can fail when Calendar.app is busy.
             events = _get_today_events_all_calendars()
-        if events:
-            _sort_events(events)
-            return events
-        # AppleScript found nothing — try MCP before giving up.
-        mcp_events = _call_mcp_get_today_events()
-        if mcp_events:
-            _sort_events(mcp_events)
-            return mcp_events
-        return []
 
-    # Non-macOS: MCP is the only source.
-    mcp_events = _call_mcp_get_today_events()
-    if mcp_events is None:
-        return []
-    _sort_events(mcp_events)
-    return mcp_events
+    if events:
+        _sort_events(events)
+        return events
+    return []

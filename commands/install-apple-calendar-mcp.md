@@ -4,7 +4,17 @@ description: Install the Apple Calendar MCP server into your MCP client config
 
 # install-apple-calendar-mcp
 
-Install the Apple Calendar MCP server into an MCP config file so that (1) `generate-daily-files.py` can call it to fill the **Meetings** section when `integrations.apple_calendar` is enabled, and (2) any MCP client (Cursor, Claude Desktop, etc.) can use the same server. The script does **not** assume Cursor; you choose where to write.
+Install the [**mcp-ical**](https://github.com/Omar-V2/mcp-ical) Apple Calendar MCP server into an MCP config file so any MCP client (Cursor, Claude Desktop, etc.) can read and manage your calendar. The script does **not** assume Cursor; you choose where to write.
+
+> **Note:** `generate-daily-files.py` no longer uses this MCP server. The plugin's **Meetings** section now reads Apple Calendar directly via native EventKit (PyObjC) in `calendar_apple.py`, with a hardened AppleScript fallback. This MCP install is only for using calendar tools from an MCP client.
+
+mcp-ical is a native **EventKit (PyObjC)** server, so:
+
+- It is **macOS-only** and requires **Calendar permission**.
+- It needs a local clone and [`uv`](https://docs.astral.sh/uv/). The installer clones it to `~/.mcp-servers/mcp-ical` and runs `uv sync` there (skipped if the directory already exists).
+- The MCP client must be **launched from a terminal/app that has Calendar access** (the permission is inherited from the launching process).
+
+Its tool surface is `list_events(start_date, end_date, calendar_name?)`, `list_calendars`, plus event create/update/delete and search — there is no `get_today_events` / `get_calendar_events`.
 
 ## Process
 
@@ -39,14 +49,10 @@ The script prints the JSON to add and common config file locations (Cursor, Clau
 
 Restart your MCP client or use its “Reload MCP” (or equivalent) so it picks up the new server.
 
-### Step 3: macOS permissions (if needed)
+### Step 3: macOS permissions (required)
 
-On macOS, if calendar tools fail or return no events, grant **Full Disk Access** (or **Automation** for Calendar) to the process that runs the MCP server (e.g. your editor or terminal): **System Settings** → **Privacy & Security** → **Privacy**.
-
-### Step 4: Enable the integration
-
-Set `integrations.apple_calendar: true` in `~/.claude/task-management-config/config.yaml` if not already enabled.
+mcp-ical uses native EventKit, so the **process that launches the MCP client must have Calendar access**. Launch your client from a terminal/app that has been granted Calendar permission under **System Settings** → **Privacy & Security** → **Calendars** (you may be prompted on first use). If calendar tools fail or return no events, this permission is the usual cause.
 
 ## Summary
 
-The same Apple Calendar MCP server is used by (1) `generate-daily-files.py` (via a small MCP client in the script) and (2) your MCP client. No Cursor-specific paths are assumed; use `MCP_CONFIG_PATH` or `--path` for your client's config.
+mcp-ical is a native EventKit (PyObjC) Apple Calendar MCP server for your MCP client. It is macOS-only, requires Calendar permission, and is cloned to `~/.mcp-servers/mcp-ical` and run via `uv`. No Cursor-specific paths are assumed; use `MCP_CONFIG_PATH` or `--path` for your client's config. The plugin's own **Meetings** section does **not** depend on this server — it reads Apple Calendar directly via EventKit in `calendar_apple.py`.
